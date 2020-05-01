@@ -10,23 +10,9 @@
 #endif
 #include <SPI.h>
 
-///////////////
-//CONFIGURATION
-///////////////
-
-#define PIN_SERIAL_RX   0
-#define PIN_SERIAL_TX   1
-
-#define PIN_JVS_RX      2
-#define PIN_JVS_TX      3
-#define PIN_JVS_DIR_TX  4
-
-#define PIN_SENSE_OUT   5
-#define PIN_SENSE_IN    A0
-
-#define PIN_BUS_TERM    7
-
-#ifdef DEBUG
+//Debug Flag (Adds/Removes log code)W
+#if 0
+#define DEBUG
 #define DLOG(MSG) Serial.print(MSG)
 #define DLOGLN(MSG) DLOG(MSG); DLOG("\r\n")
 #else
@@ -34,12 +20,33 @@
 #define DLOGLN(MSG)
 #endif
 
+///////////////
+//CONFIGURATION
+///////////////
+
+//Pin Assignments
+#define PIN_SERIAL_RX   0
+#define PIN_SERIAL_TX   1
+
+#define PIN_JVS_RX      2
+#define PIN_JVS_TX      3
+#define PIN_JVS_DIR     4
+
+#define PIN_SENSE_OUT   5
+#define PIN_SENSE_IN    A0
+
+#define PIN_BUS_TERM    8
+
+#define JVS_TX          1
+#define JVS_RX          0
+
 //Identification
 const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;SAKURA I/O;Ver 1.0;By Filip Maj (Ioncannon)\0"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
 
+//Capabilities of this I/O device
 const byte test_functions[] PROGMEM = {
   0x01, 0x02, 0x0C, 0x00, //Two Players, 12 Buttons each
   0x02, 0x02, 0x00, 0x00, //Two Coin slots
@@ -107,6 +114,10 @@ enum : byte {
   REPORT_BUSY           = 0x04,
 };
 
+//////////////////
+//Sakura Constants
+//////////////////
+
 enum : byte {
   STATE_UNKNOWN,
   STATE_RESET,
@@ -122,6 +133,7 @@ enum {
   SAK_TRUE          = 1
 };
 
+//Digital Switch Constants
 #define SW_TEST     7
 #define SW_TILT1    6
 #define SW_TILT2    5
@@ -143,9 +155,9 @@ enum {
 #define SW_PUSH7    3
 #define SW_PUSH8    2
 
-///////////////
-//CURRENT STATE
-///////////////
+/////////
+//GLOBALS
+/////////
 
 SoftwareSerial jvsSerial(PIN_JVS_RX, PIN_JVS_TX);
 USB Usb;
@@ -166,6 +178,10 @@ byte systemSwitches = 0;
 short playerSwitches[] = {0x0, 0x0};
 byte coinStatus = 0x0;
 short coinCounts[] = {0, 0};
+
+//////////////
+//MAIN PROGRAM
+//////////////
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -200,9 +216,9 @@ byte jvsReadByte() {
 
 /*
    JVS standard uses half-duplex RS-485, so the direction of data must be set before transfering.
-   If `isOn` is true, we are currently transfering, else we are receiving.
+   Mode can be JVS_RX or JVS_TX.
 */
-#define jvsSetWrite(isTX) digitalWrite(PIN_JVS_DIR_TX, isTX)
+#define jvsSetDirection(mode) digitalWrite(PIN_JVS_DIR, mode)
 
 /*
    The two ends of a RS-485 daisy chain should be terminated with a 120Ohm resistor. When the SENSE_IN
@@ -216,29 +232,29 @@ byte jvsReadByte() {
    Args: Data buffer, will store the packet if successful.
    Returns: Bytes read if successful. -1 if checksum failed.
 */
-byte rcvPacket(byte* dataBuffer) {
+short rcvPacket(byte* dataBuffer) {
   //Check if it's for us
   byte targetNode = jvsReadByte();
-  DLOG("TargetNode: "); DLOGLN(targetNode);
+  DLOG(F("[TargetNode: ")); DLOG(targetNode); DLOG(F("]"));
   if (targetNode == BROADCAST || targetNode == currentAddress) {
     DLOGLN(", packet is for us.");
     //Read data
     byte numBytes = jvsReadByte();
 
-    DLOG("NumBytes: "); DLOGLN(numBytes);
+    DLOG(F("[NumBytes: ")); DLOG(numBytes) ;DLOG(F("]"));
 
     Serial.readBytes(dataBuffer, numBytes - 1);
 
     //Test checksum
     byte checksum = jvsReadByte();
 
-    DLOG("Checksum: "); DLOGLN(checksum);
+    DLOG(F("[Checksum: ")); DLOG(checksum); DLOG(F("]"));
 
     byte testChecksum = targetNode + numBytes;
     for (byte i = 0; i < numBytes - 1; i++)
       testChecksum += dataBuffer[i];
 
-    DLOG("Test Checksum: "); DLOGLN(testChecksum);
+    DLOG(F("[Test Checksum: ")); DLOG(testChecksum); DLOGLN(F("]"));
 
     if (checksum == testChecksum)
       return numBytes - 1;
@@ -260,29 +276,32 @@ void sendResponse(byte status, byte payloadSize) {
   checksum %= 0xFF;
 
   //Write out
-  Serial.write(SYNC);
-  Serial.write(0x00);                 //Node Num (always 0)
-  Serial.write(payloadSize + 2);      //Num Bytes
-  Serial.write(status);               //Status
-  Serial.write(resultBuffer, payloadSize); //Data
-  Serial.write(checksum);             //Checksum
+  jvsSetDirection(JVS_TX);
+  jvsSerial.write(SYNC);
+  jvsSerial.write((byte)0x00);                 //Node Num (always 0)
+  jvsSerial.write(payloadSize + 2);      //Num Bytes
+  jvsSerial.write(status);               //Status
+  jvsSerial.write(resultBuffer, payloadSize); //Data
+  jvsSerial.write(checksum);             //Checksum
 }
 
-/*
-   MAIN JVS CMD HANDLER
-*/
-byte parseCommand(const byte* packet, byte* readSize, byte* result, short* resultSize) {
+//////////////////////////
+//~~MAIN JVS CMD HANDLER~~
+//////////////////////////
+short parseCommand(const byte* packet, byte* readSize, byte* result, short* resultSize) {
   *readSize = 1;
   *resultSize = 1;
 
   switch (packet[0]) {
     //Address Setup
     case OP_BUS_RESET: {
-        currentState = STATE_RESET;
-        currentAddress = BROADCAST;
-        jvsSenseHigh();
-        DLOGLN(F("Bus was reset. Setting sense to 2.5v."));
-        return SAK_BUS_RESET;
+        if (packet[1] == 0xD9) {
+          currentState = STATE_RESET;
+          currentAddress = BROADCAST;
+          jvsSenseHigh();
+          DLOGLN(F("Bus was reset. Setting SENSE_OUT to 2.5v."));
+          return SAK_BUS_RESET;
+        }
       }
     case OP_SET_ADDR: {
         //Check sense line voltage. Address is only for us
@@ -296,11 +315,13 @@ byte parseCommand(const byte* packet, byte* readSize, byte* result, short* resul
           currentState = STATE_READY;
           jvsSenseLow();
           DLOG(F("Address was set to: ")); DLOGLN(packet[1]);
-          DLOGLN(F("Setting sense to 0v."));
+          DLOGLN(F("Setting SENSE_OUT to 0v."));
           return REPORT_NORMAL;
         }
-        else
+        else {          
+          DLOGLN(F("Got address, but SENSE_IN is 2.5v. Ignoring."));
           return SAK_BUS_RESET;
+        }
       }
     //Initialization
     case OP_GET_IO_ID: {
@@ -395,19 +416,27 @@ byte parseCommand(const byte* packet, byte* readSize, byte* result, short* resul
   }
 }
 
+/*
+ * Deals with processing a single JVS packet at a time. The function waits
+ * for the SYNC byte, reads in the packet (checking checksum), and feeds
+ * each command into the command parser. Each result is collected and then
+ * sent in a response packet.
+ */
 void processJVS() {
   byte dataBuffer[0xFF];
 
+  jvsSetDirection(JVS_RX);
   DLOGLN(F("Waiting for SYNC..."));
 
   while (jvsReadByte() != SYNC); //Wait for SYNC byte
 
   DLOGLN(F("Packet found! Parsing."));
 
-  byte result = rcvPacket(dataBuffer);
+  short result = rcvPacket(dataBuffer);
 
   if (result == SAK_CHECKSUM_FAIL)
   {
+    DLOGLN(F("Checksum failed."));
     lastResultStatus = STATUS_CHECKSUM_ERR;
     sendResponse(STATUS_CHECKSUM_ERR, 0);
     return;
@@ -423,7 +452,7 @@ void processJVS() {
   short resultSize = 0;
   short resultIndex = 0;
   while (commandIndex < result) {
-    byte reportCode = parseCommand(dataBuffer + commandIndex, &commandSize, resultBuffer + resultIndex, &resultSize);
+    short reportCode = parseCommand(dataBuffer + commandIndex, &commandSize, resultBuffer + resultIndex, &resultSize);
 
     //Bus was reset
     if (reportCode == SAK_BUS_RESET) {
@@ -460,8 +489,8 @@ void setup() {
   pinMode(PIN_SERIAL_RX,  INPUT);
   pinMode(PIN_SERIAL_TX,  OUTPUT);
   pinMode(PIN_JVS_RX,     INPUT_PULLUP);
-  pinMode(PIN_JVS_TX,     INPUT_PULLUP);
-  pinMode(PIN_JVS_DIR_TX, INPUT_PULLUP);
+  pinMode(PIN_JVS_TX,     OUTPUT);
+  pinMode(PIN_JVS_DIR,    OUTPUT);
   pinMode(PIN_SENSE_OUT,  OUTPUT);
   pinMode(PIN_SENSE_IN,   INPUT_PULLUP);
   pinMode(PIN_BUS_TERM,   OUTPUT);
@@ -478,16 +507,19 @@ void setup() {
     jvsSetBusTerminator(false);
 }
 
-void loop() {
+unsigned long lastMillis = 0;
+void loop() {  
   //Get latest controller states
-  playerSwitches[0] = 0;
-  playerSwitches[1] = 0;
-
+  if (lastMillis - millis() > 200) {
+    playerSwitches[0] = 0;
+    playerSwitches[1] = 0;
+    lastMillis = millis();
+  }
   if (Serial.read() == 'T')
     setBit(playerSwitches[0], SW_TEST);
   else if (Serial.read() == 'S')
     setBit(playerSwitches[0], SW_SERVICE);
 
-  //Process JVS Packet
+  //Process a JVS Packet
   processJVS();
 }
