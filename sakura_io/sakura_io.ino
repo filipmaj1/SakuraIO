@@ -1,4 +1,5 @@
 #include <arduino.h>
+#include <avr/eeprom.h>
 #include <SoftwareSerial.h>
 
 #include <usbhid.h>
@@ -10,8 +11,10 @@
 #endif
 #include <SPI.h>
 
-//Debug Flag (Adds/Removes log code)W
-#if 0
+#include "sakEEPROM.h"
+
+//Debug Flag (Adds/Removes log code)
+#if 1
 #define DEBUG
 #define DLOG(MSG) Serial.print(MSG)
 #define DLOGLN(MSG) DLOG(MSG); DLOG("\r\n")
@@ -171,7 +174,7 @@ byte currentAddress = 0xFF;
 //Saved info about the last send packet in case of resend
 byte resultBuffer[0xFF];
 byte lastResultStatus = 0;
-short lastResultSize = 0;
+byte lastResultSize = 0;
 
 //Arcade State (Input, Output, Coins)
 byte systemSwitches = 0;
@@ -179,18 +182,206 @@ short playerSwitches[] = {0x0, 0x0};
 byte coinStatus = 0x0;
 short coinCounts[] = {0, 0};
 
-//////////////
-//MAIN PROGRAM
-//////////////
-
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
+
+
+////////////////
+//MAIN PROGRAM//
+////////////////
+
+/*~~~~~~~~~~~~PC-MAP STORAGE CODE~~~~~~~~~~~~~~~~~~*/
+
+/*
+   Map Storage:
+     numMaps (1 byte)
+     [Repeat *numMaps]
+     UID (4 bytes)
+     Offset (2 byte)
+
+   Map Entry:
+     name (15 bytes)
+     mapSize (1 byte)
+     mapData (x bytes)
+*/
+
+void addMap(unsigned long uid, char* mapName, const byte* mapData, byte mapDataSize) {
+  byte numMappings;
+  unsigned short lastMapOffset;
+  byte lastMapSize;
+
+  //Get the last offset, and add it's size for the total entry. Note: deleted maps MUST be followed by
+  //a defragmentation or this won't work.
+  sakEEPROM_Read(0, numMappings);
+  sakEEPROM_Read(1 + ((numMappings - 1) * 6) + 4, lastMapOffset);
+  sakEEPROM_Read(lastMapOffset + 0xF, lastMapSize);
+
+  //Write out the new entry
+  unsigned int newOffset = lastMapOffset + 0x10 + lastMapSize;
+  int nameLength = strlen(mapName);
+  sakEEPROM_WriteBytes(newOffset, mapName, nameLength <= 0xF ? nameLength : 0xF);
+  sakEEPROM_Write(newOffset + 0xF, mapDataSize);
+  sakEEPROM_WriteBytes(newOffset + 0x10, mapData, mapDataSize);
+
+  //Write the header entry
+  sakEEPROM_Write(1 + (numMappings * 6), uid);
+  sakEEPROM_Write(1 + (numMappings * 6) + 4, newOffset);
+}
+
+void deleteMap(int index) {
+  byte numMappings;
+  sakEEPROM_Read(0, numMappings);
+
+  //Copy each entry to the last spot
+  for (byte i = numMappings - index; i < numMappings; i++) {
+    unsigned long uid;
+    unsigned int offset;
+
+    sakEEPROM_Read(1 + (i * 6), uid);
+    sakEEPROM_Read(1 + (i * 6) + 4, offset);
+    sakEEPROM_Write(1 + ((i - 1) * 6), uid);
+    sakEEPROM_Write(1 + ((i - 1) * 6) + 4, offset);
+  }
+
+  defragRom();
+}
+
+void defragRom() {
+
+}
+
+long loadMap(long uid, const byte* mapData) {
+  byte numMappings;
+  unsigned long readUID;
+  unsigned int offset;
+  byte mapSize;
+
+  sakEEPROM_Read(0, numMappings);
+
+  for (byte i = 0; i < numMappings; i++) {
+    sakEEPROM_Read(1 + (i * 6), readUID);
+    if (uid == readUID) {
+      sakEEPROM_Read(1 + (i * 6) + 4, offset);
+      sakEEPROM_Read(offset + 0xF, mapSize);
+      sakEEPROM_ReadBytes(offset + 0x10, mapData, mapSize);
+      return mapSize;
+    }
+  }
+
+  return 0;
+}
+
+/*
+ * Quick and dirty protocol to communicate between the Sakura I/O and a PC. A `!` marker is
+ * used to sync the beginning of a packet. The structure looks like:
+ * Sync(!)    - 1 byte
+ * packetSize - 2 bytes
+ * opcode     - 1 byte
+ * checksum   - 1 byte
+ * mapdata    - variable
+ * 
+ * Sakura I/O will respond with a result code, followed by the result code XORed with the sync code.
+ * If there is data to return, the data size (2 bytes) and the data will follow, ending with another
+ * result code and XORed version.
+ * 
+ * Results: 'O' - OK, 'X' - Error, 'Y' - Checksum error, '?' - More data.
+ */
+void processMapManager() {
+  byte packetBytes[0x100];
+  char mapName[0xF];
+  byte resultCode;
+  unsigned int resultSize;
+
+  if (Serial.available()) {
+    byte huh = Serial.read();
+    DLOGLN(huh);
+    if (huh == '!') {
+      byte sizeLO = Serial.read();      
+      byte sizeHI = Serial.read();
+
+      unsigned int packetSize = sizeHI << 8 | sizeLO;
+      byte opcode = Serial.read();
+      byte checksum = Serial.read();
+
+      Serial.readBytes(packetBytes, packetSize);
+
+      //Checksum
+      byte testChecksum = 0;
+      for (int i = 0; i < packetSize; i++)
+        testChecksum += packetBytes[i];
+
+      if (checksum != testChecksum) {
+        resultCode = 'Y';
+        Serial.write(resultCode);
+        Serial.write(resultCode ^ '!');
+        return;
+      }
+
+      //Do Command
+      switch (opcode) {
+        //Ping
+        case 0: {
+            resultCode = 'O';
+            break;
+          }
+        //Get Maps
+        case 1: {
+
+          }
+        //Add Map
+        case 2: {
+            unsigned long uid = ((unsigned long*)&packetBytes)[0];
+            memcpy(mapName, &packetBytes + 4, 0xF);
+            byte mapDataSize = packetBytes[0x10];
+            addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
+            resultCode = 'O';
+            break;
+          }
+        //Delete Map
+        case 3: {
+            unsigned long uid = ((unsigned long*)&packetBytes)[0];
+            deleteMap(uid);
+            resultCode = 'O';
+            break;
+          }
+        //Get Info
+        case 4: {
+            memcpy(packetBytes, IDENTIFICATION, strlen(IDENTIFICATION));
+            packetBytes[strlen(IDENTIFICATION) + 1] = 0;
+            resultSize = strlen(IDENTIFICATION) + 1;
+            resultCode = '?';
+          }
+        default:
+          resultCode = 'X';
+      }
+
+      //Write out the result code and any data if needed.
+      Serial.write(resultCode);
+      Serial.write(resultCode ^ '!');
+      if (resultCode == '?') {
+        Serial.write(resultSize);
+        Serial.write(packetBytes, resultSize);
+        Serial.write('O');
+        Serial.write('O' ^ '!');
+      }
+    }
+  }
+}
+
+/*~~~~~~~~~~~~~~~~~~USB CODE~~~~~~~~~~~~~~~~~~*/
+
+/*
+   Deals with processing the USB Host as well as loading map files.
+*/
+void processUSB() {
+}
+
+/*~~~~~~~~~~~~~~~~~~JVS CODE~~~~~~~~~~~~~~~~~~*/
 
 /*
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
-  while (Serial.available() == 0);
   byte in = Serial.read();
   if (in == ESCAPE)
     in = Serial.read() + 1;
@@ -241,7 +432,7 @@ short rcvPacket(byte* dataBuffer) {
     //Read data
     byte numBytes = jvsReadByte();
 
-    DLOG(F("[NumBytes: ")); DLOG(numBytes) ;DLOG(F("]"));
+    DLOG(F("[NumBytes: ")); DLOG(numBytes) ; DLOG(F("]"));
 
     Serial.readBytes(dataBuffer, numBytes - 1);
 
@@ -318,7 +509,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           DLOGLN(F("Setting SENSE_OUT to 0v."));
           return REPORT_NORMAL;
         }
-        else {          
+        else {
           DLOGLN(F("Got address, but SENSE_IN is 2.5v. Ignoring."));
           return SAK_BUS_RESET;
         }
@@ -417,18 +608,28 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 }
 
 /*
- * Deals with processing a single JVS packet at a time. The function waits
- * for the SYNC byte, reads in the packet (checking checksum), and feeds
- * each command into the command parser. Each result is collected and then
- * sent in a response packet.
- */
+   Deals with processing a single JVS packet at a time. The function waits
+   for the SYNC byte, reads in the packet (checking checksum), and feeds
+   each command into the command parser. Each result is collected and then
+   sent in a response packet.
+*/
 void processJVS() {
   byte dataBuffer[0xFF];
+  long lastTime;
 
   jvsSetDirection(JVS_RX);
   DLOGLN(F("Waiting for SYNC..."));
 
-  while (jvsReadByte() != SYNC); //Wait for SYNC byte
+  lastTime = millis();
+  while (true) //Wait for SYNC byte
+  {
+    byte in = jvsReadByte();
+
+    if (in == SYNC)
+      break;
+    if (millis() - lastTime > 200)
+      return;      
+  }
 
   DLOGLN(F("Packet found! Parsing."));
 
@@ -508,18 +709,25 @@ void setup() {
 }
 
 unsigned long lastMillis = 0;
-void loop() {  
+void loop() {
   //Get latest controller states
   if (lastMillis - millis() > 200) {
     playerSwitches[0] = 0;
     playerSwitches[1] = 0;
     lastMillis = millis();
   }
-  if (Serial.read() == 'T')
-    setBit(playerSwitches[0], SW_TEST);
-  else if (Serial.read() == 'S')
-    setBit(playerSwitches[0], SW_SERVICE);
+  //if (Serial.read() == 'T')
+  //  setBit(playerSwitches[0], SW_TEST);
+  //else if (Serial.read() == 'S')
+  //  setBit(playerSwitches[0], SW_SERVICE);
+    
+  //Process Map Management (if connected to PC)
+  if (Serial.available())
+    processMapManager();
+
+  //Process USB stuff
+  processUSB();
 
   //Process a JVS Packet
-  processJVS();
+  //processJVS();
 }
