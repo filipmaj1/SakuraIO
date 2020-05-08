@@ -1,6 +1,5 @@
 #include <arduino.h>
 #include <avr/eeprom.h>
-#include <SoftwareSerial.h>
 
 #include <usbhid.h>
 #include <hiduniversal.h>
@@ -16,11 +15,12 @@
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
-#define DLOG(MSG) Serial.print(MSG)
-#define DLOGLN(MSG) DLOG(MSG); DLOG("\r\n")
+#include <AltSoftSerial.h>
+AltSoftSerial debugSerial;
+char debugBuffer[100];
+#define DebugLog(msg, ...) sprintf_P(debugBuffer, msg, #__VA_ARGS__); debugSerial.print(debugBuffer)
 #else
-#define DLOG(MSG)
-#define DLOGLN(MSG)
+#define DebugLog(msg, ...)
 #endif
 
 ///////////////
@@ -28,20 +28,17 @@
 ///////////////
 
 //Pin Assignments
-#define PIN_SERIAL_RX   0
-#define PIN_SERIAL_TX   1
-
-#define PIN_JVS_RX      2
-#define PIN_JVS_TX      3
+#define PIN_JVS_RX      0
+#define PIN_JVS_TX      1
 #define PIN_JVS_DIR     4
 
 #define PIN_SENSE_OUT   5
 #define PIN_SENSE_IN    A0
 
-#define PIN_BUS_TERM    8
+#define PIN_BUS_TERM    12
 
-#define JVS_TX          1
-#define JVS_RX          0
+#define JVS_TX          HIGH
+#define JVS_RX          LOW
 
 //Identification
 const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;SAKURA I/O;Ver 1.0;By Filip Maj (Ioncannon)\0"};
@@ -162,7 +159,6 @@ enum {
 //GLOBALS
 /////////
 
-SoftwareSerial jvsSerial(PIN_JVS_RX, PIN_JVS_TX);
 USB Usb;
 USBHub Hub(&Usb);
 HIDUniversal Hid(&Usb);
@@ -294,7 +290,6 @@ void processMapManager() {
 
   if (Serial.available()) {
     byte huh = Serial.read();
-    DLOGLN(huh);
     if (huh == '!') {
       byte sizeLO = Serial.read();      
       byte sizeHI = Serial.read();
@@ -426,32 +421,32 @@ byte jvsReadByte() {
 short rcvPacket(byte* dataBuffer) {
   //Check if it's for us
   byte targetNode = jvsReadByte();
-  DLOG(F("[TargetNode: ")); DLOG(targetNode); DLOG(F("]"));
+  DebugLog(PSTR("[TargetNode: 0x%x]\r\n"), targetNode);
   if (targetNode == BROADCAST || targetNode == currentAddress) {
-    DLOGLN(", packet is for us.");
+    DebugLog(", packet is for us.\r\n");
     //Read data
     byte numBytes = jvsReadByte();
 
-    DLOG(F("[NumBytes: ")); DLOG(numBytes) ; DLOG(F("]"));
+    DebugLog(PSTR("[NumBytes: 0x%x ]\r\n"), numBytes);
 
     Serial.readBytes(dataBuffer, numBytes - 1);
 
     //Test checksum
     byte checksum = jvsReadByte();
 
-    DLOG(F("[Checksum: ")); DLOG(checksum); DLOG(F("]"));
+    DebugLog(PSTR("[Checksum: 0x%x ]\r\n"), checksum);
 
     byte testChecksum = targetNode + numBytes;
     for (byte i = 0; i < numBytes - 1; i++)
       testChecksum += dataBuffer[i];
 
-    DLOG(F("[Test Checksum: ")); DLOG(testChecksum); DLOGLN(F("]"));
+    DebugLog(PSTR("[Test Checksum: 0x%x ]\r\n"), testChecksum);
 
     if (checksum == testChecksum)
       return numBytes - 1;
     return SAK_CHECKSUM_FAIL;
   }
-  DLOGLN("\r\nIgnoring Packet.");
+  DebugLog("\r\nIgnoring Packet.\r\n");
   return 0; //Not for us
 }
 
@@ -460,20 +455,22 @@ short rcvPacket(byte* dataBuffer) {
    Args: The resulting STATUS and it's payload.
 */
 void sendResponse(byte status, byte payloadSize) {
+  payloadSize += 2;
+  
   //Build Checksum
   byte checksum = payloadSize + status;
-  for (byte i = 0; i < payloadSize; i++)
+  for (byte i = 0; i < payloadSize - 2; i++)
     checksum += resultBuffer[i];
   checksum %= 0xFF;
 
   //Write out
   jvsSetDirection(JVS_TX);
-  jvsSerial.write(SYNC);
-  jvsSerial.write((byte)0x00);                 //Node Num (always 0)
-  jvsSerial.write(payloadSize + 2);      //Num Bytes
-  jvsSerial.write(status);               //Status
-  jvsSerial.write(resultBuffer, payloadSize); //Data
-  jvsSerial.write(checksum);             //Checksum
+  Serial.write(SYNC);
+  Serial.write((byte)0x00);                 //Node Num (always 0)
+  Serial.write(payloadSize);      //Num Bytes
+  Serial.write(status);               //Status
+  Serial.write(resultBuffer, payloadSize); //Data
+  Serial.write(checksum);             //Checksum
 }
 
 //////////////////////////
@@ -490,7 +487,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentState = STATE_RESET;
           currentAddress = BROADCAST;
           jvsSenseHigh();
-          DLOGLN(F("Bus was reset. Setting SENSE_OUT to 2.5v."));
+          DebugLog(PSTR("Bus was reset. Setting SENSE_OUT to 2.5v.\r\n"));
           return SAK_BUS_RESET;
         }
       }
@@ -505,46 +502,47 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentAddress = packet[1];
           currentState = STATE_READY;
           jvsSenseLow();
-          DLOG(F("Address was set to: ")); DLOGLN(packet[1]);
-          DLOGLN(F("Setting SENSE_OUT to 0v."));
+          DebugLog(PSTR("Address was set to: %d\r\n"), packet[1]);
+          DebugLog(PSTR("Setting SENSE_OUT to 0v.\r\n"));
           return REPORT_NORMAL;
         }
         else {
-          DLOGLN(F("Got address, but SENSE_IN is 2.5v. Ignoring."));
+          DebugLog(PSTR("Got address, but SENSE_IN is 2.5v. Ignoring.\r\n"));
           return SAK_BUS_RESET;
         }
       }
     //Initialization
     case OP_GET_IO_ID: {
-        byte idSize = strlen(IDENTIFICATION) + 1;
-        *resultSize = idSize + 1;
+        byte idSize = strlen(IDENTIFICATION);
+        *resultSize = idSize + 2;
         result[0] = REPORT_NORMAL;
         memcpy(result + 1, IDENTIFICATION, idSize);
-        DLOG(F("Sent I/O ID: ")); DLOGLN(IDENTIFICATION);
+        result[idSize+1] = 0;
+        DebugLog(PSTR("Sent I/O ID: %s\r\n"), IDENTIFICATION);
         return REPORT_NORMAL;
       }
     case OP_GET_CMD_VER: {
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_CMD;
-        DLOG(F("Sent Command Version: ")); DLOGLN(VERSION_CMD);
+        DebugLog(PSTR("Sent Command Version: 0x%x\r\n"), VERSION_CMD);
         return REPORT_NORMAL;
       }
     case OP_GET_JVS_VER: {
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_JVS;
-        DLOG(F("Sent JVS Version: ")); DLOGLN(VERSION_JVS);
+        DebugLog(PSTR("Sent JVS Version: 0x%x\r\n"), VERSION_JVS);
         return REPORT_NORMAL;
       }
     case OP_GET_COM_VER: {
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_COM;
-        DLOG(F("Sent Communication Version: ")); DLOGLN(VERSION_COM);
+        DebugLog(PSTR("Sent Communication Version: 0x%x\r\n"), VERSION_COM);
         return REPORT_NORMAL;
       }
     case OP_GET_FUNCTIONS: {
         result[0] = REPORT_NORMAL;
         memcpy(result + 1, test_functions, 9);
-        DLOGLN(F("Sent I/O Functions"));
+        DebugLog(PSTR("Sent I/O Functions\r\n"));
         return REPORT_NORMAL;
       }
     case OP_MAIN_ID: {
@@ -562,11 +560,11 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         char mainID[100];
         memcpy(mainID, packet + 1, i);
-        DLOG(F("Got Mainboard ID: ")); DLOGLN(mainID);
+        DebugLog(PSTR("Got Mainboard ID: %s\r\n"), mainID);
         return REPORT_NORMAL;
       }
     case OP_DATA_RESEND: {
-        DLOGLN(F("Got a resend request"));
+        DebugLog(PSTR("Got a resend request\r\n"));
         return SAK_RESEND;
       }
     //Input
@@ -602,7 +600,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
     //Output
     //If all else fails, unknown code error
     default:
-      DLOG(F("Got unknown command: ")); DLOGLN(packet[0]);
+      DebugLog(PSTR("Got unknown command: 0x%x\r\n"), packet[0]);
       return SAK_UNKNOWN_CMD;
   }
 }
@@ -618,26 +616,17 @@ void processJVS() {
   long lastTime;
 
   jvsSetDirection(JVS_RX);
-  DLOGLN(F("Waiting for SYNC..."));
+  DebugLog(PSTR("Waiting for SYNC...\r\n"));
 
-  lastTime = millis();
-  while (true) //Wait for SYNC byte
-  {
-    byte in = jvsReadByte();
+  while (jvsReadByte() != SYNC); //Wait for SYNC byte
 
-    if (in == SYNC)
-      break;
-    if (millis() - lastTime > 200)
-      return;      
-  }
-
-  DLOGLN(F("Packet found! Parsing."));
+  DebugLog(PSTR("Packet found! Parsing.\r\n"));
 
   short result = rcvPacket(dataBuffer);
 
   if (result == SAK_CHECKSUM_FAIL)
   {
-    DLOGLN(F("Checksum failed."));
+    DebugLog(PSTR("Checksum failed.\r\n"));
     lastResultStatus = STATUS_CHECKSUM_ERR;
     sendResponse(STATUS_CHECKSUM_ERR, 0);
     return;
@@ -687,23 +676,32 @@ void processJVS() {
 }
 
 void setup() {
-  pinMode(PIN_SERIAL_RX,  INPUT);
-  pinMode(PIN_SERIAL_TX,  OUTPUT);
-  pinMode(PIN_JVS_RX,     INPUT_PULLUP);
+  #ifdef DEBUG
+  debugSerial.begin(9600);
+  #endif
+
+  DebugLog(PSTR("Sakura I/O Board; a JVS to USB adapter.\r\n"));
+  
+  DebugLog(PSTR("Setting up pins...\r\n"));
+  pinMode(PIN_JVS_RX,     INPUT);
   pinMode(PIN_JVS_TX,     OUTPUT);
   pinMode(PIN_JVS_DIR,    OUTPUT);
   pinMode(PIN_SENSE_OUT,  OUTPUT);
   pinMode(PIN_SENSE_IN,   INPUT_PULLUP);
   pinMode(PIN_BUS_TERM,   OUTPUT);
-  Serial.begin(9600);
-  jvsSerial.begin(115200);
+  
+  DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
+  Serial.begin(115200);
+  while(!Serial);
 
   jvsSenseHigh();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
-  if (voltage > 4.75f)
-    jvsSetBusTerminator(true);
+  if (voltage > 4.75f) {
+    jvsSetBusTerminator(true);    
+    DebugLog(PSTR("Last device in chain detected. Bus Terminator: ON\r\n"));
+  }
   else
     jvsSetBusTerminator(false);
 }
@@ -722,12 +720,12 @@ void loop() {
   //  setBit(playerSwitches[0], SW_SERVICE);
     
   //Process Map Management (if connected to PC)
-  if (Serial.available())
-    processMapManager();
+  //if (Serial.available())
+    //processMapManager();
 
   //Process USB stuff
   processUSB();
 
   //Process a JVS Packet
-  //processJVS();
+  processJVS();
 }
