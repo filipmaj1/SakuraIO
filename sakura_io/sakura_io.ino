@@ -1,14 +1,14 @@
 #include <arduino.h>
 #include <avr/eeprom.h>
 
-#include <usbhid.h>
-#include <hiduniversal.h>
-#include <usbhub.h>
+//#include <usbhid.h>
+//#include <hiduniversal.h>
+//#include <usbhub.h>
 
-#ifdef dobogusinclude
-#include <spi4teensy3.h>
-#endif
-#include <SPI.h>
+//#ifdef dobogusinclude
+//#include <spi4teensy3.h>
+//#endif
+//#include <SPI.h>
 
 #include "sakEEPROM.h"
 
@@ -18,9 +18,9 @@
 #include <AltSoftSerial.h>
 AltSoftSerial debugSerial;
 char debugBuffer[100];
-#define DebugLog(msg, ...) sprintf_P(debugBuffer, msg, #__VA_ARGS__); debugSerial.print(debugBuffer)
+#define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); debugSerial.print(debugBuffer)
 #else
-#define DebugLog(msg, ...)
+#define DebugLog(...)
 #endif
 
 ///////////////
@@ -28,13 +28,9 @@ char debugBuffer[100];
 ///////////////
 
 //Pin Assignments
-#define PIN_JVS_RX      0
-#define PIN_JVS_TX      1
 #define PIN_JVS_DIR     4
-
 #define PIN_SENSE_OUT   5
 #define PIN_SENSE_IN    A0
-
 #define PIN_BUS_TERM    12
 
 #define JVS_TX          HIGH
@@ -159,9 +155,9 @@ enum {
 //GLOBALS
 /////////
 
-USB Usb;
-USBHub Hub(&Usb);
-HIDUniversal Hid(&Usb);
+//USB Usb;
+//USBHub Hub(&Usb);
+//HIDUniversal Hid(&Usb);
 
 //Current Sakura I/O State
 byte currentState = STATE_UNKNOWN;
@@ -268,20 +264,20 @@ long loadMap(long uid, const byte* mapData) {
 }
 
 /*
- * Quick and dirty protocol to communicate between the Sakura I/O and a PC. A `!` marker is
- * used to sync the beginning of a packet. The structure looks like:
- * Sync(!)    - 1 byte
- * packetSize - 2 bytes
- * opcode     - 1 byte
- * checksum   - 1 byte
- * mapdata    - variable
- * 
- * Sakura I/O will respond with a result code, followed by the result code XORed with the sync code.
- * If there is data to return, the data size (2 bytes) and the data will follow, ending with another
- * result code and XORed version.
- * 
- * Results: 'O' - OK, 'X' - Error, 'Y' - Checksum error, '?' - More data.
- */
+   Quick and dirty protocol to communicate between the Sakura I/O and a PC. A `!` marker is
+   used to sync the beginning of a packet. The structure looks like:
+   Sync(!)    - 1 byte
+   packetSize - 2 bytes
+   opcode     - 1 byte
+   checksum   - 1 byte
+   mapdata    - variable
+
+   Sakura I/O will respond with a result code, followed by the result code XORed with the sync code.
+   If there is data to return, the data size (2 bytes) and the data will follow, ending with another
+   result code and XORed version.
+
+   Results: 'O' - OK, 'X' - Error, 'Y' - Checksum error, '?' - More data.
+*/
 void processMapManager() {
   byte packetBytes[0x100];
   char mapName[0xF];
@@ -291,7 +287,7 @@ void processMapManager() {
   if (Serial.available()) {
     byte huh = Serial.read();
     if (huh == '!') {
-      byte sizeLO = Serial.read();      
+      byte sizeLO = Serial.read();
       byte sizeHI = Serial.read();
 
       unsigned int packetSize = sizeHI << 8 | sizeLO;
@@ -377,9 +373,11 @@ void processUSB() {
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
+  while (!Serial.available());
   byte in = Serial.read();
   if (in == ESCAPE)
     in = Serial.read() + 1;
+
   return in;
 }
 
@@ -404,7 +402,8 @@ byte jvsReadByte() {
    JVS standard uses half-duplex RS-485, so the direction of data must be set before transfering.
    Mode can be JVS_RX or JVS_TX.
 */
-#define jvsSetDirection(mode) digitalWrite(PIN_JVS_DIR, mode)
+#define jvsSetDirectionTX() PORTD |= 0b00010000
+#define jvsSetDirectionRX() PORTD &= 0b11101111
 
 /*
    The two ends of a RS-485 daisy chain should be terminated with a 120Ohm resistor. When the SENSE_IN
@@ -421,26 +420,20 @@ byte jvsReadByte() {
 short rcvPacket(byte* dataBuffer) {
   //Check if it's for us
   byte targetNode = jvsReadByte();
-  DebugLog(PSTR("[TargetNode: 0x%x]\r\n"), targetNode);
+  //DebugLog(PSTR("===PACKET===\r\n"));
   if (targetNode == BROADCAST || targetNode == currentAddress) {
-    DebugLog(", packet is for us.\r\n");
     //Read data
     byte numBytes = jvsReadByte();
 
-    DebugLog(PSTR("[NumBytes: 0x%x ]\r\n"), numBytes);
-
-    Serial.readBytes(dataBuffer, numBytes - 1);
+    Serial.readBytes(dataBuffer, numBytes);
 
     //Test checksum
-    byte checksum = jvsReadByte();
-
-    DebugLog(PSTR("[Checksum: 0x%x ]\r\n"), checksum);
-
+    byte checksum = dataBuffer[numBytes - 1];
     byte testChecksum = targetNode + numBytes;
     for (byte i = 0; i < numBytes - 1; i++)
       testChecksum += dataBuffer[i];
-
-    DebugLog(PSTR("[Test Checksum: 0x%x ]\r\n"), testChecksum);
+    //DebugLog(PSTR("[NumBytes: 0x%x]\r\n"), numBytes);
+    //DebugLog(PSTR("[Checksum: 0x%x][Test Checksum: 0x%x]\r\n"), checksum, testChecksum);
 
     if (checksum == testChecksum)
       return numBytes - 1;
@@ -451,26 +444,28 @@ short rcvPacket(byte* dataBuffer) {
 }
 
 /*
-   Sends a result packet down the line. Payload version.
+   Sends a result packet down the line. Direction is changed to TRANSMIT, bytes are sent, and then changed back to RECEIVE.
    Args: The resulting STATUS and it's payload.
 */
-void sendResponse(byte status, byte payloadSize) {
+void sendResponse(byte statusCode, byte payloadSize) {
   payloadSize += 2;
-  
+
   //Build Checksum
-  byte checksum = payloadSize + status;
+  byte checksum = payloadSize + statusCode;
   for (byte i = 0; i < payloadSize - 2; i++)
     checksum += resultBuffer[i];
   checksum %= 0xFF;
 
   //Write out
-  jvsSetDirection(JVS_TX);
+  jvsSetDirectionTX();
   Serial.write(SYNC);
-  Serial.write((byte)0x00);                 //Node Num (always 0)
-  Serial.write(payloadSize);      //Num Bytes
-  Serial.write(status);               //Status
-  Serial.write(resultBuffer, payloadSize); //Data
-  Serial.write(checksum);             //Checksum
+  Serial.write(0x00);                       //Node Num (always id 0 for master)
+  Serial.write(payloadSize);                //Num Bytes
+  Serial.write(statusCode);                 //Status
+  Serial.write(resultBuffer, payloadSize);  //Data
+  Serial.write(checksum);                   //Checksum
+  delayMicroseconds((payloadSize+2) * 100); //The Arduino is faster than the Naomi. Give it some time to receive the bytes.
+  jvsSetDirectionRX();
 }
 
 //////////////////////////
@@ -487,7 +482,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentState = STATE_RESET;
           currentAddress = BROADCAST;
           jvsSenseHigh();
-          DebugLog(PSTR("Bus was reset. Setting SENSE_OUT to 2.5v.\r\n"));
+          DebugLog(PSTR("Bus was reset. SENSE_OUT set to 2.5v.\r\n"));
           return SAK_BUS_RESET;
         }
       }
@@ -502,8 +497,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentAddress = packet[1];
           currentState = STATE_READY;
           jvsSenseLow();
-          DebugLog(PSTR("Address was set to: %d\r\n"), packet[1]);
-          DebugLog(PSTR("Setting SENSE_OUT to 0v.\r\n"));
+          DebugLog(PSTR("Address set to: %d. SENSE_OUT set to 0v.\r\n"), packet[1]);
           return REPORT_NORMAL;
         }
         else {
@@ -517,7 +511,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         *resultSize = idSize + 2;
         result[0] = REPORT_NORMAL;
         memcpy(result + 1, IDENTIFICATION, idSize);
-        result[idSize+1] = 0;
+        result[idSize + 1] = 0;
         DebugLog(PSTR("Sent I/O ID: %s\r\n"), IDENTIFICATION);
         return REPORT_NORMAL;
       }
@@ -615,12 +609,11 @@ void processJVS() {
   byte dataBuffer[0xFF];
   long lastTime;
 
-  jvsSetDirection(JVS_RX);
-  DebugLog(PSTR("Waiting for SYNC...\r\n"));
+  //DebugLog(PSTR("Waiting for SYNC...\r\n"));
 
   while (jvsReadByte() != SYNC); //Wait for SYNC byte
 
-  DebugLog(PSTR("Packet found! Parsing.\r\n"));
+  //DebugLog(PSTR("Packet found! Parsing.\r\n"));
 
   short result = rcvPacket(dataBuffer);
 
@@ -676,56 +669,35 @@ void processJVS() {
 }
 
 void setup() {
-  #ifdef DEBUG
+#ifdef DEBUG
   debugSerial.begin(9600);
-  #endif
+#endif
 
   DebugLog(PSTR("Sakura I/O Board; a JVS to USB adapter.\r\n"));
-  
+
   DebugLog(PSTR("Setting up pins...\r\n"));
-  pinMode(PIN_JVS_RX,     INPUT);
-  pinMode(PIN_JVS_TX,     OUTPUT);
   pinMode(PIN_JVS_DIR,    OUTPUT);
   pinMode(PIN_SENSE_OUT,  OUTPUT);
   pinMode(PIN_SENSE_IN,   INPUT_PULLUP);
   pinMode(PIN_BUS_TERM,   OUTPUT);
-  
+
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
   Serial.begin(115200);
-  while(!Serial);
-
-  jvsSenseHigh();
+  jvsSetDirectionRX();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
   if (voltage > 4.75f) {
-    jvsSetBusTerminator(true);    
+    jvsSetBusTerminator(true);
     DebugLog(PSTR("Last device in chain detected. Bus Terminator: ON\r\n"));
   }
   else
     jvsSetBusTerminator(false);
 }
 
-unsigned long lastMillis = 0;
 void loop() {
-  //Get latest controller states
-  if (lastMillis - millis() > 200) {
-    playerSwitches[0] = 0;
-    playerSwitches[1] = 0;
-    lastMillis = millis();
+  //Inner loop to save some speed.
+  while (true) {
+    processJVS();
   }
-  //if (Serial.read() == 'T')
-  //  setBit(playerSwitches[0], SW_TEST);
-  //else if (Serial.read() == 'S')
-  //  setBit(playerSwitches[0], SW_SERVICE);
-    
-  //Process Map Management (if connected to PC)
-  //if (Serial.available())
-    //processMapManager();
-
-  //Process USB stuff
-  processUSB();
-
-  //Process a JVS Packet
-  processJVS();
 }
