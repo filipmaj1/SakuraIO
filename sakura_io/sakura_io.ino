@@ -15,8 +15,8 @@
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
-#include <AltSoftSerial.h>
-AltSoftSerial debugSerial;
+#include <SoftwareSerial.h>
+SoftwareSerial debugSerial(5,6);
 char debugBuffer[100];
 #define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); debugSerial.print(debugBuffer)
 #else
@@ -28,16 +28,18 @@ char debugBuffer[100];
 ///////////////
 
 //Pin Assignments
-#define PIN_JVS_DIR     4
-#define PIN_SENSE_OUT   5
+#define PIN_JVS_DIR     2
+#define PIN_BUS_TERM    3
+#define PIN_SENSE_OUT   4
 #define PIN_SENSE_IN    A0
-#define PIN_BUS_TERM    12
+
 
 #define JVS_TX          HIGH
 #define JVS_RX          LOW
 
 //Identification
-const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;SAKURA I/O;Ver 1.0;By Filip Maj (Ioncannon)\0"};
+const char IDENTIFICATION[] PROGMEM = {"Company;Sakura I/O;v0.01;Comment\0"};
+//const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v0.01;By Filip Maj\0"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
@@ -170,9 +172,9 @@ byte lastResultSize = 0;
 
 //Arcade State (Input, Output, Coins)
 byte systemSwitches = 0;
-short playerSwitches[] = {0x0, 0x0};
+unsigned int playerSwitches[] = {0xFFFF, 0x0};
 byte coinStatus = 0x0;
-short coinCounts[] = {0, 0};
+short coinCounts[] = {10, 0};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -395,15 +397,15 @@ byte jvsReadByte() {
    Sets the SENSE_OUT pin for the next device in the chain, informing it that our address has been
    set. When addressSet is true, the pin voltage is 0V. Otherwise it emits 2.5V.
 */
-#define jvsSenseHigh() analogWrite(PIN_SENSE_OUT, 128.0f) //2.5v if address is not set.
-#define jvsSenseLow() analogWrite(PIN_SENSE_OUT, 0.0f) //0v if address is set.
+#define jvsSenseHigh() digitalWrite(PIN_SENSE_OUT, LOW) //2.5v if address is not set.
+#define jvsSenseLow() digitalWrite(PIN_SENSE_OUT, HIGH) //0v if address is set.
 
 /*
    JVS standard uses half-duplex RS-485, so the direction of data must be set before transfering.
    Mode can be JVS_RX or JVS_TX.
 */
-#define jvsSetDirectionTX() PORTD |= 0b00010000
-#define jvsSetDirectionRX() PORTD &= 0b11101111
+#define jvsSetDirectionTX() PORTD |= 0b00000100
+#define jvsSetDirectionRX() PORTD &= 0b11111011
 
 /*
    The two ends of a RS-485 daisy chain should be terminated with a 120Ohm resistor. When the SENSE_IN
@@ -444,10 +446,12 @@ short rcvPacket(byte* dataBuffer) {
 }
 
 /*
-   Sends a result packet down the line. Direction is changed to TRANSMIT, bytes are sent, and then changed back to RECEIVE.
+   Sends a result packet down the line. Payload version.
    Args: The resulting STATUS and it's payload.
 */
+byte sendback[] = {0xE0, 0x00, 0x03, 0x1, 0x1, 0x5};
 void sendResponse(byte statusCode, byte payloadSize) {
+
   payloadSize += 2;
 
   //Build Checksum
@@ -458,13 +462,18 @@ void sendResponse(byte statusCode, byte payloadSize) {
 
   //Write out
   jvsSetDirectionTX();
-  Serial.write(SYNC);
-  Serial.write(0x00);                       //Node Num (always id 0 for master)
-  Serial.write(payloadSize);                //Num Bytes
-  Serial.write(statusCode);                 //Status
-  Serial.write(resultBuffer, payloadSize);  //Data
-  Serial.write(checksum);                   //Checksum
-  delayMicroseconds((payloadSize+2) * 100); //The Arduino is faster than the Naomi. Give it some time to receive the bytes.
+  Serial.write(SYNC);                           //SYNC Byte
+  Serial.write(0x00);                           //Node Num (always 0)
+  Serial.write(payloadSize);                    //Num Bytes
+  Serial.write(statusCode);                     //Status
+  for (int i = 0; i < payloadSize - 2; i++) {
+    Serial.write(resultBuffer[i]);
+    delayMicroseconds(50);
+  }
+  //Serial.write(resultBuffer, payloadSize - 2);  //Data
+  Serial.write(checksum);                       //Checksum
+
+  delayMicroseconds((payloadSize + 2) * 100);
   jvsSetDirectionRX();
 }
 
@@ -482,7 +491,8 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentState = STATE_RESET;
           currentAddress = BROADCAST;
           jvsSenseHigh();
-          DebugLog(PSTR("Bus was reset. SENSE_OUT set to 2.5v.\r\n"));
+          DebugLog(PSTR("Bus was reset. Setting SENSE_OUT to 2.5v.\r\n"));
+          jvsSetDirectionRX();
           return SAK_BUS_RESET;
         }
       }
@@ -497,7 +507,8 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           currentAddress = packet[1];
           currentState = STATE_READY;
           jvsSenseLow();
-          DebugLog(PSTR("Address set to: %d. SENSE_OUT set to 0v.\r\n"), packet[1]);
+          DebugLog(PSTR("Address was set to: %d\r\n"), packet[1]);
+          DebugLog(PSTR("Setting SENSE_OUT to 0v.\r\n"));
           return REPORT_NORMAL;
         }
         else {
@@ -507,35 +518,39 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
       }
     //Initialization
     case OP_GET_IO_ID: {
-        byte idSize = strlen(IDENTIFICATION);
+        byte idSize = strlen_P(IDENTIFICATION);
         *resultSize = idSize + 2;
         result[0] = REPORT_NORMAL;
-        memcpy(result + 1, IDENTIFICATION, idSize);
-        result[idSize + 1] = 0;
-        DebugLog(PSTR("Sent I/O ID: %s\r\n"), IDENTIFICATION);
+        memcpy_P(result + 1, IDENTIFICATION, idSize);
+        result[idSize + 2] = 0;
+        DebugLog(PSTR("Sent I/O ID: %S\r\n"), IDENTIFICATION);
         return REPORT_NORMAL;
       }
     case OP_GET_CMD_VER: {
+        *resultSize = 2;
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_CMD;
         DebugLog(PSTR("Sent Command Version: 0x%x\r\n"), VERSION_CMD);
         return REPORT_NORMAL;
       }
     case OP_GET_JVS_VER: {
+        *resultSize = 2;
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_JVS;
         DebugLog(PSTR("Sent JVS Version: 0x%x\r\n"), VERSION_JVS);
         return REPORT_NORMAL;
       }
     case OP_GET_COM_VER: {
+        *resultSize = 2;
         result[0] = REPORT_NORMAL;
         result[1] = VERSION_COM;
         DebugLog(PSTR("Sent Communication Version: 0x%x\r\n"), VERSION_COM);
         return REPORT_NORMAL;
       }
     case OP_GET_FUNCTIONS: {
+        *resultSize = 1 + 9;
         result[0] = REPORT_NORMAL;
-        memcpy(result + 1, test_functions, 9);
+        memcpy_P(result + 1, test_functions, 9);
         DebugLog(PSTR("Sent I/O Functions\r\n"));
         return REPORT_NORMAL;
       }
@@ -574,21 +589,23 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         }
 
         *readSize = 2 + (playerCount * dataSize);
+        *resultSize = 2 + (playerCount * dataSize);
+        //debugSerial.write(result, *resultSize);
         return REPORT_NORMAL;
       }
     case OP_INPUT_COINS: {
         byte slotCount = packet[1];
         result[0] = REPORT_NORMAL;
-
         for (int i = 0; i < slotCount; i++) {
           byte cStat = (coinStatus >> (i * 2)) & 3;
-          byte r1 = (cStat << 6) | ((coinCounts[i] >> 2) & 0b00111111);
+          byte r1 = (cStat << 6) | ((coinCounts[i] >> 8) & 0b00111111);
           byte r2 = coinCounts[i] & 0xFF;
-          result[i * 2 + 1] = r1;
-          result[i * 2 + 2] = r2;
+          result[(i * 2) + 1] = r1;
+          result[(i * 2) + 2] = r2;
         }
 
         *readSize = 1 + (2 * slotCount);
+        *resultSize = 1 + (2 * slotCount);
         return REPORT_NORMAL;
       }
     //Output
@@ -616,6 +633,7 @@ void processJVS() {
   //DebugLog(PSTR("Packet found! Parsing.\r\n"));
 
   short result = rcvPacket(dataBuffer);
+  jvsSetDirectionTX();
 
   if (result == SAK_CHECKSUM_FAIL)
   {
@@ -664,7 +682,8 @@ void processJVS() {
   lastResultStatus = STATUS_NORMAL;
   lastResultSize = resultIndex;
 
-  //Send the response back
+  //Send t
+  he response back
   sendResponse(STATUS_NORMAL, resultIndex);
 }
 
@@ -682,8 +701,11 @@ void setup() {
   pinMode(PIN_BUS_TERM,   OUTPUT);
 
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
-  Serial.begin(115200);
+  Serial.begin(9600);
+  Serial.print("AM I RUNNING?");
+
   jvsSetDirectionRX();
+  jvsSenseHigh();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
@@ -695,9 +717,39 @@ void setup() {
     jvsSetBusTerminator(false);
 }
 
+long lastMillis = millis();
 void loop() {
-  //Inner loop to save some speed.
   while (true) {
+
+    if (millis() - lastMillis > 800)
+      playerSwitches[0] = 0;
+
+    if (debugSerial.available()) {
+      DebugLog(PSTR("TEST/r/n"));
+      char val = debugSerial.read();
+      int i = -1;
+      if (val == 'w')
+        i = 0;
+      else if (val == 'a')
+        i = 1;
+      else if (val == 's')
+        i = 2;
+      else if (val == 'd')
+        i = 3;
+      else if (val == 'y')
+        i = 4;
+
+      if (i != -1) {
+        playerSwitches[0] |= 1 << i;
+        DebugLog(PSTR("Setting to %x\r\n"), playerSwitches[0]);
+      }
+    }
+
+    //Process a JVS Packet
     processJVS();
+
+    //if (Serial.available()) {
+    //  DebugLog(PSTR(" 0x%x\r\n"), jvsReadByte());
+    //}
   }
 }
