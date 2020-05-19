@@ -412,11 +412,11 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 9, //[Type][Bit Position][JVS Dest]
    Deals with processing the USB Host as well as loading map files.
 */
 void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
-  for (int i = 0; i < mapLength[0]; i++) {
+  int playerIndex = 0;
+  
+  for (int i = 0; i < mapLength[playerIndex]; i++) {
     byte type = currentMaps[0][i++];
-    byte bitPosition = currentMaps[0][i++];
-
-    //DebugLog(PSTR("MAP LOOP: %d; Type=%d, bitPos=%d\r\n"), i, type, bitPosition);
+    byte bitPosition = currentMaps[playerIndex][i++];
 
     //Start Post
     byte bytePosition = bitPosition / 8;
@@ -424,7 +424,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
     //Button
     if (type == USB_TYPE_BUTTON) {
-      byte jvsDest = currentMaps[0][i];
+      byte jvsDest = currentMaps[playerIndex][i];
 
       //Unassigned (needed?)
       if (jvsDest == 0xFF)
@@ -440,8 +440,8 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
     }
     //Tophat
     else if (type == USB_TYPE_HAT_SW) {
-      byte valueMask = currentMaps[0][i++];
-      byte innerMapLen = currentMaps[0][i++];
+      byte valueMask = currentMaps[playerIndex][i++];
+      byte innerMapLen = currentMaps[playerIndex][i++];
 
       uint32_t* intBuffer = (uint32_t*)(buff + bytePosition);
       int value = (intBuffer[0] >> remainder) & valueMask;
@@ -450,8 +450,8 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
       for (int j = 0; j < innerMapLen; j++) {
         //Found the value. Assign and set scanner to the end.
-        if (currentMaps[0][i + (j * 2)] == value) {
-          switch (currentMaps[0][i + (j * 2) + 1]) {
+        if (currentMaps[playerIndex][i + (j * 2)] == value) {
+          switch (currentMaps[playerIndex][i + (j * 2) + 1]) {
             case SW_LEFT_UP:
               playerSwitches[0] |= 0b0010010000000000;
               break;
@@ -465,7 +465,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
               playerSwitches[0] |= 0b0001100000000000;
               break;
             default:
-              playerSwitches[0] |= (1 << currentMaps[0][i + (j * 2) + 1]);
+              playerSwitches[0] |= (1 << currentMaps[playerIndex][i + (j * 2) + 1]);
           }
         }       
       }
@@ -694,14 +694,11 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         result[0] = REPORT_NORMAL;
         result[1] = systemSwitches;
-        for (int i = 0; i < playerCount; i++) {
-          result[2 + (i * 2)] = (playerSwitches[i] >> 8) & 0xFF;
-          result[2 + (i * 2) + 1] = playerSwitches[i] & 0xFF;
-        }
+        memcpy(result+2, &playerSwitches, 2 * playerCount);
 
         *readSize = 2 + (playerCount * dataSize);
         *resultSize = 2 + (playerCount * dataSize);
-        //debugSerial.write(result, *resultSize);
+        debugSerial.write(result, *resultSize);
         return REPORT_NORMAL;
       }
     case OP_INPUT_COINS: {
