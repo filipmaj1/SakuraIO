@@ -18,8 +18,8 @@
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
-#include <SoftwareSerial.h>
-SoftwareSerial debugSerial(5, 6);
+#include <AltSoftSerial.h>
+AltSoftSerial debugSerial;
 char debugBuffer[100];
 #define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); debugSerial.print(debugBuffer)
 
@@ -63,7 +63,7 @@ const byte test_functions[] PROGMEM = {
   0x00         //Terminator
 };
 
-#define JVS_TIMEOUT 10
+#define JVS_TIMEOUT 15
 
 ///////////////
 //JVS CONSTANTS
@@ -392,18 +392,18 @@ void processMapManager() {
   }
 }
 
-byte testMap[] = {USB_TYPE_BUTTON, 0x00, 9, //[Type][Bit Position][JVS Dest]
-                  USB_TYPE_BUTTON, 0x01, 5,
-                  USB_TYPE_BUTTON, 0x02, 4,
-                  USB_TYPE_BUTTON, 0x03, 8,
-                  USB_TYPE_BUTTON, 0x04, 6,
-                  USB_TYPE_BUTTON, 0x05, 7,
-                  USB_TYPE_BUTTON, 0x06, 2,
-                  USB_TYPE_BUTTON, 0x07, 3,
-                  USB_TYPE_BUTTON, 0x08, 14,
-                  USB_TYPE_BUTTON, 0x09, 15,
+byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
+                  USB_TYPE_BUTTON, 0x01, 13,
+                  USB_TYPE_BUTTON, 0x02, 12,
+                  USB_TYPE_BUTTON, 0x03, 0,
+                  USB_TYPE_BUTTON, 0x04, 14,
+                  USB_TYPE_BUTTON, 0x05, 15,
+                  USB_TYPE_BUTTON, 0x06, 10,
+                  USB_TYPE_BUTTON, 0x07, 11,
+                  USB_TYPE_BUTTON, 0x08, 6,
+                  USB_TYPE_BUTTON, 0x09, 7,
                   USB_TYPE_BUTTON, 0x0B, 255,
-                  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 13, 1, 16, 2, 12, 3, 17, 4, 11, 5, 18, 6, 10, 7, 19 //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+                  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, 16, 2, 4, 3, 17, 4, 3, 5, 18, 6, 2, 7, 19 //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
                  };
 
 /*~~~~~~~~~~~~~~~~~~USB CODE~~~~~~~~~~~~~~~~~~*/
@@ -412,11 +412,12 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 9, //[Type][Bit Position][JVS Dest]
    Deals with processing the USB Host as well as loading map files.
 */
 void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
-  int playerIndex = 0;
-  
-  for (int i = 0; i < mapLength[playerIndex]; i++) {
-    byte type = currentMaps[0][i++];
-    byte bitPosition = currentMaps[playerIndex][i++];
+  int playerIndex = 1;
+  int mapIndex = 0;
+
+  for (int i = 0; i < mapLength[mapIndex]; i++) {
+    byte type = currentMaps[mapIndex][i++];
+    byte bitPosition = currentMaps[mapIndex][i++];
 
     //Start Post
     byte bytePosition = bitPosition / 8;
@@ -424,7 +425,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
     //Button
     if (type == USB_TYPE_BUTTON) {
-      byte jvsDest = currentMaps[playerIndex][i];
+      byte jvsDest = currentMaps[mapIndex][i];
 
       //Unassigned (needed?)
       if (jvsDest == 0xFF)
@@ -433,41 +434,41 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
       bool value = (buff[bytePosition] >> remainder) & 1;
 
       if (value) {
-        playerSwitches[0] |= (1 << jvsDest);
+        playerSwitches[playerIndex] |= (1 << jvsDest);
       }
       else
-        playerSwitches[0] &= ~(1 << jvsDest);
+        playerSwitches[playerIndex] &= ~(1 << jvsDest);
     }
     //Tophat
     else if (type == USB_TYPE_HAT_SW) {
-      byte valueMask = currentMaps[playerIndex][i++];
-      byte innerMapLen = currentMaps[playerIndex][i++];
+      byte valueMask = currentMaps[mapIndex][i++];
+      byte innerMapLen = currentMaps[mapIndex][i++];
 
       uint32_t* intBuffer = (uint32_t*)(buff + bytePosition);
       int value = (intBuffer[0] >> remainder) & valueMask;
 
-      playerSwitches[0] &= 0b1100001111111111;
+      playerSwitches[playerIndex] &= 0b1111111111000011;
 
       for (int j = 0; j < innerMapLen; j++) {
         //Found the value. Assign and set scanner to the end.
-        if (currentMaps[playerIndex][i + (j * 2)] == value) {
-          switch (currentMaps[playerIndex][i + (j * 2) + 1]) {
+        if (currentMaps[mapIndex][i + (j * 2)] == value) {
+          switch (currentMaps[mapIndex][i + (j * 2) + 1]) {
             case SW_LEFT_UP:
-              playerSwitches[0] |= 0b0010010000000000;
+              playerSwitches[playerIndex] |= 0b0000000000100100;
               break;
             case SW_LEFT_DOWN:
-              playerSwitches[0] |= 0b0000110000000000;
+              playerSwitches[playerIndex] |= 0b0000000000001100;
               break;
             case SW_RIGHT_UP:
-              playerSwitches[0] |= 0b0011000000000000;
+              playerSwitches[playerIndex] |= 0b0000000000110000;
               break;
             case SW_RIGHT_DOWN:
-              playerSwitches[0] |= 0b0001100000000000;
+              playerSwitches[playerIndex] |= 0b0000000000011000;
               break;
             default:
-              playerSwitches[0] |= (1 << currentMaps[playerIndex][i + (j * 2) + 1]);
+              playerSwitches[playerIndex] |= (1 << currentMaps[mapIndex][i + (j * 2) + 1]);
           }
-        }       
+        }
       }
       i += innerMapLen * 2;
     }
@@ -478,7 +479,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
     }
   }
 
-  DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[0] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[0] & 0xFF));
+  //DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
 }
 
 /*~~~~~~~~~~~~~~~~~~JVS CODE~~~~~~~~~~~~~~~~~~*/
@@ -487,9 +488,12 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
+  while (!Serial.available());
   byte in = Serial.read();
-  if (in == ESCAPE)
+  if (in == ESCAPE) {
+    while (!Serial.available());
     in = Serial.read() + 1;
+  }
   delayMicroseconds(10);
   return in;
 }
@@ -694,14 +698,15 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         result[0] = REPORT_NORMAL;
         result[1] = systemSwitches;
-        memcpy(result+2, &playerSwitches, 2 * playerCount);
+        memcpy(result + 2, &playerSwitches, 2 * playerCount);
 
         *readSize = 2 + (playerCount * dataSize);
         *resultSize = 2 + (playerCount * dataSize);
-        debugSerial.write(result, *resultSize);
+
         return REPORT_NORMAL;
       }
     case OP_INPUT_COINS: {
+        DebugLog(PSTR("Coin Request\r\n"));
         byte slotCount = packet[1];
         result[0] = REPORT_NORMAL;
         for (int i = 0; i < slotCount; i++) {
@@ -737,7 +742,8 @@ void processJVS() {
 
   //Wait for SYNC byte
   lastJVSMillis = millis();
-  while (jvsReadByte() != SYNC) {
+  
+  while (Serial.read() != SYNC) {
     //Timeout so it doesn't get lock execution.
     if (millis() - lastJVSMillis >= JVS_TIMEOUT)
       return;
@@ -830,8 +836,7 @@ void setup() {
   }
   else {
     DebugLog(PSTR("USB OSC started.\r\n"));
-    if (!Hid.SetReportParser(0, &genericHIDParser))
-      DebugLog(PSTR("ERROR: HID setup failed.\r\n"));
+    Hid.SetReportParser(0, &genericHIDParser);
   }
   DebugLog(PSTR("Sakura I/O Initialized!\r\n"));
 
