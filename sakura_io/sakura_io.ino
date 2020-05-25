@@ -205,7 +205,7 @@ byte lastResultSize = 0;
 byte systemSwitches = 0;
 unsigned int playerSwitches[] = {0x0, 0x0};
 byte coinStatus = 0x0;
-short coinCounts[] = {10, 0};
+short coinCounts[] = {0x3FFF, 0xFF};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -412,7 +412,7 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
    Deals with processing the USB Host as well as loading map files.
 */
 void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
-  int playerIndex = 1;
+  int playerIndex = 0;
   int mapIndex = 0;
 
   for (int i = 0; i < mapLength[mapIndex]; i++) {
@@ -556,7 +556,7 @@ short rcvPacket(byte* dataBuffer) {
       return numBytes - 1;
     return SAK_CHECKSUM_FAIL;
   }
-  DebugLog("\r\nIgnoring Packet.\r\n");
+  DebugLog(PSTR("\r\nIgnoring Packet.\r\n"));
   return 0; //Not for us
 }
 
@@ -700,13 +700,12 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         result[1] = systemSwitches;
         memcpy(result + 2, &playerSwitches, 2 * playerCount);
 
-        *readSize = 2 + (playerCount * dataSize);
+        *readSize += 2;
         *resultSize = 2 + (playerCount * dataSize);
 
         return REPORT_NORMAL;
       }
     case OP_INPUT_COINS: {
-        DebugLog(PSTR("Coin Request\r\n"));
         byte slotCount = packet[1];
         result[0] = REPORT_NORMAL;
         for (int i = 0; i < slotCount; i++) {
@@ -717,11 +716,23 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           result[(i * 2) + 2] = r2;
         }
 
-        *readSize = 1 + (2 * slotCount);
+        *readSize += 1;
         *resultSize = 1 + (2 * slotCount);
+
         return REPORT_NORMAL;
       }
     //Output
+    case OP_OUTPUT_SUB_COINS: {
+        result[0] = REPORT_NORMAL;
+        *readSize += 3;
+
+        byte cointSlot = packet[1];
+        short subtraction = packet[2] << 8 | packet[3];
+
+        DebugLog(PSTR("Got request to reduce coins by: %d.\r\n"), subtraction);
+
+        return REPORT_NORMAL;
+      }
     //If all else fails, unknown code error
     default:
       DebugLog(PSTR("Got unknown command: 0x%x\r\n"), packet[0]);
@@ -742,7 +753,7 @@ void processJVS() {
 
   //Wait for SYNC byte
   lastJVSMillis = millis();
-  
+
   while (Serial.read() != SYNC) {
     //Timeout so it doesn't get lock execution.
     if (millis() - lastJVSMillis >= JVS_TIMEOUT)
@@ -851,9 +862,5 @@ void loop() {
 
     //Process a JVS Packet
     processJVS();
-
-    //if (Serial.available()) {
-    //  DebugLog(PSTR(" 0x%x\r\n"), jvsReadByte());
-    //}
   }
 }
