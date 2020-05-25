@@ -168,10 +168,10 @@ enum {
 #define SW_PUSH8    2
 
 //Extensions
-#define SW_LEFT_UP     19
-#define SW_LEFT_DOWN   18
-#define SW_RIGHT_DOWN  17
-#define SW_RIGHT_UP    16
+#define SW_UP_LEFT     19
+#define SW_DOWN_LEFT   18
+#define SW_DOWN_RIGHT  17
+#define SW_UP_RIGHT    16
 
 //USB Constants
 #define USB_TYPE_BUTTON 0
@@ -205,7 +205,7 @@ byte lastResultSize = 0;
 byte systemSwitches = 0;
 unsigned int playerSwitches[] = {0x0, 0x0};
 byte coinStatus = 0x0;
-short coinCounts[] = {0x3FFF, 0xFF};
+short coinCounts[] = {10, 10};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -403,7 +403,7 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
                   USB_TYPE_BUTTON, 0x08, 6,
                   USB_TYPE_BUTTON, 0x09, 7,
                   USB_TYPE_BUTTON, 0x0B, 255,
-                  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, 16, 2, 4, 3, 17, 4, 3, 5, 18, 6, 2, 7, 19 //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+                  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
                  };
 
 /*~~~~~~~~~~~~~~~~~~USB CODE~~~~~~~~~~~~~~~~~~*/
@@ -453,17 +453,17 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
         //Found the value. Assign and set scanner to the end.
         if (currentMaps[mapIndex][i + (j * 2)] == value) {
           switch (currentMaps[mapIndex][i + (j * 2) + 1]) {
-            case SW_LEFT_UP:
+            case SW_UP_LEFT:
+              playerSwitches[playerIndex] |= 0b0000000000101000;
+              break;
+            case SW_DOWN_LEFT:
+              playerSwitches[playerIndex] |= 0b0000000000011000;
+              break;
+            case SW_UP_RIGHT:
               playerSwitches[playerIndex] |= 0b0000000000100100;
               break;
-            case SW_LEFT_DOWN:
-              playerSwitches[playerIndex] |= 0b0000000000001100;
-              break;
-            case SW_RIGHT_UP:
-              playerSwitches[playerIndex] |= 0b0000000000110000;
-              break;
-            case SW_RIGHT_DOWN:
-              playerSwitches[playerIndex] |= 0b0000000000011000;
+            case SW_DOWN_RIGHT:
+              playerSwitches[playerIndex] |= 0b0000000000010100;
               break;
             default:
               playerSwitches[playerIndex] |= (1 << currentMaps[mapIndex][i + (j * 2) + 1]);
@@ -605,7 +605,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         if (packet[1] == 0xD9) {
           currentState = STATE_RESET;
           currentAddress = BROADCAST;
-          jvsSenseHigh();
+          //jvsSenseHigh();
           DebugLog(PSTR("Bus was reset. Setting SENSE_OUT to 2.5v.\r\n"));
           jvsSetDirectionRX();
           return SAK_BUS_RESET;
@@ -621,7 +621,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           result[0] = REPORT_NORMAL;
           currentAddress = packet[1];
           currentState = STATE_READY;
-          jvsSenseLow();
+          //jvsSenseLow();
           DebugLog(PSTR("Address was set to: %d\r\n"), packet[1]);
           DebugLog(PSTR("Setting SENSE_OUT to 0v.\r\n"));
           return REPORT_NORMAL;
@@ -670,6 +670,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         return REPORT_NORMAL;
       }
     case OP_MAIN_ID: {
+        DebugLog(PSTR("MainID\r\n"));
         result[0] = REPORT_NORMAL;
 
         //Get end of string
@@ -829,7 +830,8 @@ void setup() {
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
   Serial.begin(115200);
   jvsSetDirectionRX();
-  jvsSenseHigh();
+  //jvsSenseHigh();
+  jvsSenseLow();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
