@@ -15,10 +15,6 @@
 #include "sakEEPROM.h"
 #include "GenericHIDParser.h"
 
-#define PCSerial debugSerial
-#define DebugSerial debugSerial
-#define JvsSerial Serial
-
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
@@ -364,17 +360,17 @@ void processMapManager() {
   byte resultCode;
   unsigned int resultSize;
 
-  if (PCSerial.available()) {
-    byte huh = PCSerial.read();
+  if (Serial.available()) {
+    byte huh = Serial.read();
     if (huh == '!') {
-      byte sizeLO = PCSerial.read();
-      byte sizeHI = PCSerial.read();
+      byte sizeLO = Serial.read();
+      byte sizeHI = Serial.read();
 
       unsigned int packetSize = sizeHI << 8 | sizeLO;
-      byte opcode = PCSerial.read();
-      byte checksum = PCSerial.read();
+      byte opcode = Serial.read();
+      byte checksum = Serial.read();
 
-      PCSerial.readBytes(packetBytes, packetSize);
+      Serial.readBytes(packetBytes, packetSize);
 
       //Checksum
       byte testChecksum = 0;
@@ -383,8 +379,8 @@ void processMapManager() {
 
       if (checksum != testChecksum) {
         resultCode = 'Y';
-        PCSerial.write(resultCode);
-        PCSerial.write(resultCode ^ '!');
+        Serial.write(resultCode);
+        Serial.write(resultCode ^ '!');
         return;
       }
 
@@ -404,14 +400,14 @@ void processMapManager() {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
             memcpy(mapName, &packetBytes + 4, 0xF);
             byte mapDataSize = packetBytes[0x10];
-            fs_addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
+            addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
             resultCode = 'O';
             break;
           }
         //Delete Map
         case 3: {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
-            fs_deleteMap(uid);
+            deleteMap(uid);
             resultCode = 'O';
             break;
           }
@@ -427,13 +423,13 @@ void processMapManager() {
       }
 
       //Write out the result code and any data if needed.
-      PCSerial.write(resultCode);
-      PCSerial.write(resultCode ^ '!');
+      Serial.write(resultCode);
+      Serial.write(resultCode ^ '!');
       if (resultCode == '?') {
-        PCSerial.write(resultSize);
-        PCSerial.write(packetBytes, resultSize);
-        PCSerial.write('O');
-        PCSerial.write('O' ^ '!');
+        Serial.write(resultSize);
+        Serial.write(packetBytes, resultSize);
+        Serial.write('O');
+        Serial.write('O' ^ '!');
       }
     }
   }
@@ -476,8 +472,8 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
     //If not, free this map and load a new one
     if (newMap == NULL) {
-      freeMap(currentMaps[id]);
-      int loaded = fs_loadMap(vidpid, &newMap);
+      free(currentMaps[id]);
+      int loaded = loadMap(vidpid, &newMap);
       //If loaded, assign the map. Otherwise it stays unassigned.
       if (loaded) 
         currentMaps[id] = newMap;
@@ -489,7 +485,7 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   }
 
   //Handle map/input reading
-  int playerIndex = id;
+  int playerIndex = 0;
 
   for (int i = 0; i < currentMaps[id]->size; i++) {
     byte type = currentMaps[id]->data[i++];
@@ -564,11 +560,11 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
-  while (!JvsSerial.available());
-  byte in = JvsSerial.read();
+  while (!Serial.available());
+  byte in = Serial.read();
   if (in == ESCAPE) {
-    while (!JvsSerial.available());
-    in = JvsSerial.read() + 1;
+    while (!Serial.available());
+    in = Serial.read() + 1;
   }
   delayMicroseconds(10);
   return in;
@@ -617,7 +613,7 @@ short rcvPacket(byte* dataBuffer) {
     //Read data
     byte numBytes = jvsReadByte();
 
-    JvsSerial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
+    Serial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
 
     //Test checksum
     byte checksum = dataBuffer[numBytes - 1];
@@ -649,15 +645,15 @@ void sendResponse(byte statusCode, byte payloadSize) {
 
   //Write out
   jvsSetDirectionTX();
-  JvsSerial.write(SYNC);                           //SYNC Byte
-  JvsSerial.write(0x00);                           //Node Num (always 0)
-  JvsSerial.write(payloadSize);                    //Num Bytes
-  JvsSerial.write(statusCode);                     //Status
+  Serial.write(SYNC);                           //SYNC Byte
+  Serial.write(0x00);                           //Node Num (always 0)
+  Serial.write(payloadSize);                    //Num Bytes
+  Serial.write(statusCode);                     //Status
   for (int i = 0; i < payloadSize - 2; i++) {
-    JvsSerial.write(resultBuffer[i]);
+    Serial.write(resultBuffer[i]);
     delayMicroseconds(50);
   }
-  JvsSerial.write(checksum);                       //Checksum
+  Serial.write(checksum);                       //Checksum
 
   delayMicroseconds((payloadSize + 2) * 100);
   jvsSetDirectionRX();
@@ -859,7 +855,7 @@ void processJVS() {
   //Wait for SYNC byte
   lastJVSMillis = millis();
 
-  while (JvsSerial.read() != SYNC) {
+  while (Serial.read() != SYNC) {
     //Timeout so it doesn't get lock execution.
     if (millis() - lastJVSMillis >= JVS_TIMEOUT)
       return;
@@ -921,7 +917,7 @@ void processJVS() {
 
 void setup() {
 #ifdef DEBUG
-  DebugSerial.begin(9600);
+  debugSerial.begin(9600);
 #endif
   DebugLog(PSTR("Sakura I/O Board; a JVS to USB adapter.\r\n"));
 
