@@ -15,6 +15,10 @@
 #include "sakEEPROM.h"
 #include "GenericHIDParser.h"
 
+#define PCSerial debugSerial
+#define DebugSerial debugSerial
+#define JvsSerial Serial
+
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
@@ -58,8 +62,10 @@ const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v0.01;By Fil
 
 //Capabilities of this I/O device
 const byte test_functions[] PROGMEM = {
-  0x01, 0x02, 0x0C, 0x00, //Two Players, 12 Buttons each
+  0x01, 0x02, 0x0D, 0x00, //Two Players, 12 Buttons each
   0x02, 0x02, 0x00, 0x00, //Two Coin slots
+  0x03, 0x08, 0x00, 0x00, //Eight Analog inputs
+  0x12, 0x06, 0x00, 0x00, //General Purpose Output Driver
   0x00         //Terminator
 };
 
@@ -182,15 +188,26 @@ enum {
 //GLOBALS
 /////////
 
+struct Map {
+  uint32_t vidpid;
+  byte size;
+  byte* data;
+};
+
 //USB Objects
 USB Usb;
 USBHub Hub(&Usb);
-HIDUniversal Hid(&Usb);
-void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff);
-GenericHIDParser genericHIDParser(&processUSB);
+void processUSB(int slot, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff);
+GenericHIDParser genericHIDParser0(0, &processUSB);
+GenericHIDParser genericHIDParser1(1, &processUSB);
 
-byte* currentMaps[2];
-int   mapLength[2];
+//Maps
+GenericHID Hid1(&Usb);
+GenericHID Hid2(&Usb);
+#define MAX_INPUTS 2
+uint32_t lastLoadAttempts[MAX_INPUTS];
+Map* currentMaps[MAX_INPUTS];
+Map* loadedMaps[MAX_INPUTS];
 
 //Current Sakura I/O State
 byte currentState = STATE_UNKNOWN;
@@ -209,7 +226,6 @@ short coinCounts[] = {10, 10};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
-
 
 ////////////////
 //MAIN PROGRAM//
@@ -230,7 +246,7 @@ short coinCounts[] = {10, 10};
      mapData (x bytes)
 */
 
-void addMap(unsigned long uid, char* mapName, const byte* mapData, byte mapDataSize) {
+void fs_addMap(unsigned long uid, char* mapName, const byte* mapData, byte mapDataSize) {
   byte numMappings;
   unsigned short lastMapOffset;
   byte lastMapSize;
@@ -253,7 +269,7 @@ void addMap(unsigned long uid, char* mapName, const byte* mapData, byte mapDataS
   sakEEPROM_Write(1 + (numMappings * 6) + 4, newOffset);
 }
 
-void deleteMap(int index) {
+void fs_deleteMap(int index) {
   byte numMappings;
   sakEEPROM_Read(0, numMappings);
 
@@ -268,32 +284,63 @@ void deleteMap(int index) {
     sakEEPROM_Write(1 + ((i - 1) * 6) + 4, offset);
   }
 
-  defragRom();
+  fs_defragRom();
 }
 
-void defragRom() {
+void fs_defragRom() {
 
 }
 
-long loadMap(long uid, const byte* mapData) {
+int fs_loadMap(uint32_t vidpid, Map** newMap) {
   byte numMappings;
-  unsigned long readUID;
+  unsigned long readVIDPID;
   unsigned int offset;
   byte mapSize;
 
-  sakEEPROM_Read(0, numMappings);
-
-  for (byte i = 0; i < numMappings; i++) {
-    sakEEPROM_Read(1 + (i * 6), readUID);
-    if (uid == readUID) {
-      sakEEPROM_Read(1 + (i * 6) + 4, offset);
-      sakEEPROM_Read(offset + 0xF, mapSize);
-      sakEEPROM_ReadBytes(offset + 0x10, mapData, mapSize);
-      return mapSize;
+  int loadedMapIndex = -1;
+  for (int i = 0; i < MAX_INPUTS; i++) {
+    if (loadedMaps[i] == NULL) {
+      loadedMapIndex = i;
+      break;
     }
   }
 
-  return 0;
+  //NO FREE SLOTS (shouldn't happen if things are properly freed (and under max inputs).
+  if (loadedMapIndex == -1)
+    return -2;
+
+  //LOAD MAP
+  sakEEPROM_Read(0, numMappings);
+  for (byte i = 0; i < numMappings; i++) {
+    sakEEPROM_Read(1 + (i * 6), readVIDPID);
+    if (vidpid == readVIDPID) {
+      *newMap = (Map*) malloc(sizeof(Map));
+      sakEEPROM_Read(1 + (i * 6) + 4, offset);
+      sakEEPROM_Read(offset + 0xF, mapSize);
+      sakEEPROM_ReadBytes(offset + 0x10, (*newMap)->data, mapSize);
+
+      (*newMap)->vidpid = vidpid;
+      (*newMap)->size = mapSize;
+
+      loadedMaps[loadedMapIndex] = *newMap;
+
+      return 1;
+    }
+  }
+
+  //MAP NOT FOUND FOR VIDPID
+  return -1;
+}
+
+void freeMap(Map* toFree) {
+  if (!toFree)
+    return;
+  for (int i = 0; i < MAX_INPUTS; i++) {
+    if (loadedMaps[i] == toFree) {
+      free(toFree);
+      loadedMaps[i] = NULL;
+    }
+  }
 }
 
 /*
@@ -317,17 +364,17 @@ void processMapManager() {
   byte resultCode;
   unsigned int resultSize;
 
-  if (Serial.available()) {
-    byte huh = Serial.read();
+  if (PCSerial.available()) {
+    byte huh = PCSerial.read();
     if (huh == '!') {
-      byte sizeLO = Serial.read();
-      byte sizeHI = Serial.read();
+      byte sizeLO = PCSerial.read();
+      byte sizeHI = PCSerial.read();
 
       unsigned int packetSize = sizeHI << 8 | sizeLO;
-      byte opcode = Serial.read();
-      byte checksum = Serial.read();
+      byte opcode = PCSerial.read();
+      byte checksum = PCSerial.read();
 
-      Serial.readBytes(packetBytes, packetSize);
+      PCSerial.readBytes(packetBytes, packetSize);
 
       //Checksum
       byte testChecksum = 0;
@@ -336,8 +383,8 @@ void processMapManager() {
 
       if (checksum != testChecksum) {
         resultCode = 'Y';
-        Serial.write(resultCode);
-        Serial.write(resultCode ^ '!');
+        PCSerial.write(resultCode);
+        PCSerial.write(resultCode ^ '!');
         return;
       }
 
@@ -357,14 +404,14 @@ void processMapManager() {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
             memcpy(mapName, &packetBytes + 4, 0xF);
             byte mapDataSize = packetBytes[0x10];
-            addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
+            fs_addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
             resultCode = 'O';
             break;
           }
         //Delete Map
         case 3: {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
-            deleteMap(uid);
+            fs_deleteMap(uid);
             resultCode = 'O';
             break;
           }
@@ -380,18 +427,19 @@ void processMapManager() {
       }
 
       //Write out the result code and any data if needed.
-      Serial.write(resultCode);
-      Serial.write(resultCode ^ '!');
+      PCSerial.write(resultCode);
+      PCSerial.write(resultCode ^ '!');
       if (resultCode == '?') {
-        Serial.write(resultSize);
-        Serial.write(packetBytes, resultSize);
-        Serial.write('O');
-        Serial.write('O' ^ '!');
+        PCSerial.write(resultSize);
+        PCSerial.write(packetBytes, resultSize);
+        PCSerial.write('O');
+        PCSerial.write('O' ^ '!');
       }
     }
   }
 }
 
+//8 button map
 byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
                   USB_TYPE_BUTTON, 0x01, 13,
                   USB_TYPE_BUTTON, 0x02, 12,
@@ -411,13 +459,41 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
 /*
    Deals with processing the USB Host as well as loading map files.
 */
-void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
-  int playerIndex = 0;
-  int mapIndex = 0;
+void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
+  GenericHID* thisHid = (GenericHID*) hid;
+  uint32_t vidpid = thisHid->getVIDPID();
 
-  for (int i = 0; i < mapLength[mapIndex]; i++) {
-    byte type = currentMaps[mapIndex][i++];
-    byte bitPosition = currentMaps[mapIndex][i++];
+  //If VIDPID has changed, a different usb device was plugged into this slot. Load Map!
+  if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || currentMaps[id]->vidpid != vidpid) {
+    //Check if map is already loaded
+    Map* newMap = NULL;
+    for (int i = 0; i < MAX_INPUTS; i++) {
+      if (vidpid = loadedMaps[i]->vidpid) {
+        newMap = loadedMaps[i];
+        break;
+      }
+    }
+
+    //If not, free this map and load a new one
+    if (newMap == NULL) {
+      freeMap(currentMaps[id]);
+      int loaded = fs_loadMap(vidpid, &newMap);
+      //If loaded, assign the map. Otherwise it stays unassigned.
+      if (loaded) 
+        currentMaps[id] = newMap;
+      else
+        lastLoadAttempts[id] = vidpid;
+    }  else {
+      currentMaps[id] = newMap; //Otherwise set to this map;
+    }
+  }
+
+  //Handle map/input reading
+  int playerIndex = id;
+
+  for (int i = 0; i < currentMaps[id]->size; i++) {
+    byte type = currentMaps[id]->data[i++];
+    byte bitPosition = currentMaps[id]->data[i++];
 
     //Start Post
     byte bytePosition = bitPosition / 8;
@@ -425,7 +501,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
     //Button
     if (type == USB_TYPE_BUTTON) {
-      byte jvsDest = currentMaps[mapIndex][i];
+      byte jvsDest = currentMaps[id]->data[i];
 
       //Unassigned (needed?)
       if (jvsDest == 0xFF)
@@ -441,8 +517,8 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
     }
     //Tophat
     else if (type == USB_TYPE_HAT_SW) {
-      byte valueMask = currentMaps[mapIndex][i++];
-      byte innerMapLen = currentMaps[mapIndex][i++];
+      byte valueMask = currentMaps[id]->data[i++];
+      byte innerMapLen = currentMaps[id]->data[i++];
 
       uint32_t* intBuffer = (uint32_t*)(buff + bytePosition);
       int value = (intBuffer[0] >> remainder) & valueMask;
@@ -451,8 +527,8 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
 
       for (int j = 0; j < innerMapLen; j++) {
         //Found the value. Assign and set scanner to the end.
-        if (currentMaps[mapIndex][i + (j * 2)] == value) {
-          switch (currentMaps[mapIndex][i + (j * 2) + 1]) {
+        if (currentMaps[id]->data[i + (j * 2)] == value) {
+          switch (currentMaps[id]->data[i + (j * 2) + 1]) {
             case SW_UP_LEFT:
               playerSwitches[playerIndex] |= 0b0000000000101000;
               break;
@@ -466,7 +542,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
               playerSwitches[playerIndex] |= 0b0000000000010100;
               break;
             default:
-              playerSwitches[playerIndex] |= (1 << currentMaps[mapIndex][i + (j * 2) + 1]);
+              playerSwitches[playerIndex] |= (1 << currentMaps[id]->data[i + (j * 2) + 1]);
           }
         }
       }
@@ -479,7 +555,7 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
     }
   }
 
-  //DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
+  DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
 }
 
 /*~~~~~~~~~~~~~~~~~~JVS CODE~~~~~~~~~~~~~~~~~~*/
@@ -488,11 +564,11 @@ void processUSB(USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
-  while (!Serial.available());
-  byte in = Serial.read();
+  while (!JvsSerial.available());
+  byte in = JvsSerial.read();
   if (in == ESCAPE) {
-    while (!Serial.available());
-    in = Serial.read() + 1;
+    while (!JvsSerial.available());
+    in = JvsSerial.read() + 1;
   }
   delayMicroseconds(10);
   return in;
@@ -537,20 +613,17 @@ byte jvsReadByte() {
 short rcvPacket(byte* dataBuffer) {
   //Check if it's for us
   byte targetNode = jvsReadByte();
-  //DebugLog(PSTR("===PACKET===\r\n"));
   if (targetNode == BROADCAST || targetNode == currentAddress) {
     //Read data
     byte numBytes = jvsReadByte();
 
-    Serial.readBytes(dataBuffer, numBytes);
+    JvsSerial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
 
     //Test checksum
     byte checksum = dataBuffer[numBytes - 1];
     byte testChecksum = targetNode + numBytes;
     for (byte i = 0; i < numBytes - 1; i++)
       testChecksum += dataBuffer[i];
-    //DebugLog(PSTR("[NumBytes: 0x%x]\r\n"), numBytes);
-    //DebugLog(PSTR("[Checksum: 0x%x][Test Checksum: 0x%x]\r\n"), checksum, testChecksum);
 
     if (checksum == testChecksum)
       return numBytes - 1;
@@ -564,7 +637,6 @@ short rcvPacket(byte* dataBuffer) {
    Sends a result packet down the line. Payload version.
    Args: The resulting STATUS and it's payload.
 */
-byte sendback[] = {0xE0, 0x00, 0x03, 0x1, 0x1, 0x5};
 void sendResponse(byte statusCode, byte payloadSize) {
 
   payloadSize += 2;
@@ -577,16 +649,15 @@ void sendResponse(byte statusCode, byte payloadSize) {
 
   //Write out
   jvsSetDirectionTX();
-  Serial.write(SYNC);                           //SYNC Byte
-  Serial.write(0x00);                           //Node Num (always 0)
-  Serial.write(payloadSize);                    //Num Bytes
-  Serial.write(statusCode);                     //Status
+  JvsSerial.write(SYNC);                           //SYNC Byte
+  JvsSerial.write(0x00);                           //Node Num (always 0)
+  JvsSerial.write(payloadSize);                    //Num Bytes
+  JvsSerial.write(statusCode);                     //Status
   for (int i = 0; i < payloadSize - 2; i++) {
-    Serial.write(resultBuffer[i]);
+    JvsSerial.write(resultBuffer[i]);
     delayMicroseconds(50);
   }
-  //Serial.write(resultBuffer, payloadSize - 2);  //Data
-  Serial.write(checksum);                       //Checksum
+  JvsSerial.write(checksum);                       //Checksum
 
   delayMicroseconds((payloadSize + 2) * 100);
   jvsSetDirectionRX();
@@ -600,12 +671,23 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
   *resultSize = 1;
 
   switch (packet[0]) {
+    case 0: {
+        DebugLog(PSTR("Wut\r\n"));
+        DebugLog(PSTR("%x "), packet[0]);
+        DebugLog(PSTR("%x "), packet[1]);
+        DebugLog(PSTR("%x "), packet[2]);
+        DebugLog(PSTR("%x "), packet[3]);
+        DebugLog(PSTR("%x "), packet[4]);
+        DebugLog(PSTR("%x "), packet[5]);
+        result[0] = REPORT_NORMAL;
+        return REPORT_NORMAL;
+      }
     //Address Setup
     case OP_BUS_RESET: {
         if (packet[1] == 0xD9) {
           currentState = STATE_RESET;
           currentAddress = BROADCAST;
-          //jvsSenseHigh();
+          jvsSenseHigh();
           DebugLog(PSTR("Bus was reset. Setting SENSE_OUT to 2.5v.\r\n"));
           jvsSetDirectionRX();
           return SAK_BUS_RESET;
@@ -621,7 +703,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
           result[0] = REPORT_NORMAL;
           currentAddress = packet[1];
           currentState = STATE_READY;
-          //jvsSenseLow();
+          jvsSenseLow();
           DebugLog(PSTR("Address was set to: %d\r\n"), packet[1]);
           DebugLog(PSTR("Setting SENSE_OUT to 0v.\r\n"));
           return REPORT_NORMAL;
@@ -663,14 +745,14 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         return REPORT_NORMAL;
       }
     case OP_GET_FUNCTIONS: {
-        *resultSize = 1 + 9;
+        *resultSize = 1 + 17;
         result[0] = REPORT_NORMAL;
-        memcpy_P(result + 1, test_functions, 9);
+        memcpy_P(result + 1, test_functions, 17);
         DebugLog(PSTR("Sent I/O Functions\r\n"));
         return REPORT_NORMAL;
       }
     case OP_MAIN_ID: {
-        DebugLog(PSTR("MainID\r\n"));
+        DebugLog(PSTR("!!!!MainID!!!!\r\n"));
         result[0] = REPORT_NORMAL;
 
         //Get end of string
@@ -722,6 +804,20 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         return REPORT_NORMAL;
       }
+    case OP_INPUT_ANALOG: {
+        byte numChannels = packet[1];
+        *readSize += 1;
+
+        result[0] = REPORT_NORMAL;
+        for (int i = 0; i < numChannels; i++) {
+          result[1 + (i * 2)] = 0x80;
+          result[1 + (i * 2) + 1] = 0x00;
+        }
+
+        *resultSize = 1 + (2 * numChannels);
+
+        return REPORT_NORMAL;
+      }
     //Output
     case OP_OUTPUT_SUB_COINS: {
         result[0] = REPORT_NORMAL;
@@ -732,6 +828,14 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         DebugLog(PSTR("Got request to reduce coins by: %d.\r\n"), subtraction);
 
+        return REPORT_NORMAL;
+      }
+    case OP_OUTPUT_GP1: {
+        result[0] = REPORT_NORMAL;
+
+        byte dataSize = packet[1];
+
+        *readSize += 1 + dataSize;
         return REPORT_NORMAL;
       }
     //If all else fails, unknown code error
@@ -755,7 +859,7 @@ void processJVS() {
   //Wait for SYNC byte
   lastJVSMillis = millis();
 
-  while (Serial.read() != SYNC) {
+  while (JvsSerial.read() != SYNC) {
     //Timeout so it doesn't get lock execution.
     if (millis() - lastJVSMillis >= JVS_TIMEOUT)
       return;
@@ -817,7 +921,7 @@ void processJVS() {
 
 void setup() {
 #ifdef DEBUG
-  debugSerial.begin(9600);
+  DebugSerial.begin(9600);
 #endif
   DebugLog(PSTR("Sakura I/O Board; a JVS to USB adapter.\r\n"));
 
@@ -849,12 +953,13 @@ void setup() {
   }
   else {
     DebugLog(PSTR("USB OSC started.\r\n"));
-    Hid.SetReportParser(0, &genericHIDParser);
+    Hid1.SetReportParser(0, &genericHIDParser0);
+    Hid2.SetReportParser(1, &genericHIDParser1);
   }
   DebugLog(PSTR("Sakura I/O Initialized!\r\n"));
 
-  currentMaps[0] = testMap;
-  mapLength[0] = 45;
+  //currentMaps[0] = testMap;
+  //mapLength[0] = 45;
 }
 
 void loop() {

@@ -2,19 +2,28 @@
 #define GENERIC_HID_PARSER_H
 
 #include <usbhid.h>
+#include <hiduniversal.h>
 
 class GenericHIDParser : public HIDReportParser {
-        uint8_t oldPad[5];
-        uint8_t oldHat;
-        uint16_t oldButtons;
+  private:
+    int id;
+    void (*callback)(int, USBHID*, bool, uint8_t, uint8_t*);
 
-private:
-        void (*callback)(USBHID*,bool,uint8_t,uint8_t*);
+  public:
+    GenericHIDParser(int id, void (*callback)(int, USBHID*, bool, uint8_t, uint8_t*));
 
-public:
-        GenericHIDParser(void (*callback)(USBHID*,bool,uint8_t,uint8_t*));
+    virtual void Parse(USBHID *hid, bool is_rpt_id, uint8_t len, uint8_t *buf);
+};
 
-        virtual void Parse(USBHID *hid, bool is_rpt_id, uint8_t len, uint8_t *buf);
+class GenericHID : public HIDUniversal {
+  public:
+    GenericHID(USB *p);
+    uint32_t getVIDPID();
+    uint64_t getLastResponse();
+
+  private:
+    uint64_t lastResponse;
+
 };
 
 #endif
