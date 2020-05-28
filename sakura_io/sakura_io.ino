@@ -1032,7 +1032,7 @@ void setup() {
   pinMode(PIN_BUS_TERM,   OUTPUT);
 
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
-  Serial.begin(115200);
+  JvsSerial.begin(115200);
   jvsSetDirectionRX();
   //jvsSenseHigh();
   jvsSenseLow();
