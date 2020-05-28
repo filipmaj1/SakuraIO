@@ -334,27 +334,30 @@ void fs_clear() {
 }
 
 int fs_loadMap(uint32_t vidpid, Map** newMap) {
-  byte numMappings;
-  unsigned long readVIDPID;
-  unsigned int offset;
-  byte mapSize;
-
+  uint8_t numMappings;
+  uint32_t readVIDPID;
+  uint16_t offset;
+  uint8_t mapSize;
+  
   //LOAD MAP
   EEPROM.get(0, numMappings);
   for (byte i = 0; i < numMappings; i++) {
     EEPROM.get(1 + (i * 6), readVIDPID);
+    //Found
     if (vidpid == readVIDPID) {
-      *newMap = (Map*) malloc(sizeof(Map));
+      *newMap = (Map*) malloc(sizeof(Map));      
 
       if (*newMap == NULL) //OUT OF MEMORY
         return -1;
 
       EEPROM.get(1 + (i * 6) + 4, offset);
       EEPROM.get(offset + 0xF, mapSize);
+      (*newMap)->data = (byte*) malloc(mapSize);
       sakEEPROM_readBytes(offset + 0x10, (*newMap)->data, mapSize);
 
       (*newMap)->vidpid = vidpid;
-      (*newMap)->size = mapSize;
+      (*newMap)->size = mapSize;    
+
       return 1;
     }
   }
@@ -398,8 +401,12 @@ int loadMap(uint32_t vidpid, Map** newMap) {
     return -2;
 
   int rcode = fs_loadMap(vidpid, newMap);
-  loadedMaps[loadedMapIndex] = *newMap;
 
+  if (rcode)
+    loadedMaps[loadedMapIndex] = *newMap;
+
+  DebugLog(PSTR("Map Indx = %d\r\n"), loadedMapIndex);
+  
   return rcode;
 }
 
@@ -408,6 +415,7 @@ void freeMap(Map* toFree) {
     return;
   for (int i = 0; i < MAX_INPUTS; i++) {
     if (loadedMaps[i] == toFree) {
+      free(toFree->data);
       free(toFree);
       loadedMaps[i] = NULL;
     }
@@ -534,8 +542,8 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   GenericHID* thisHid = (GenericHID*) hid;
   uint32_t vidpid = thisHid->getVIDPID();
 
-  DebugLog(PSTR("ID: %x, VIDPID: %x\r\n"), id, vidpid);
-  DebugLog(PSTR("Last Attempt: %x\r\n"), lastLoadAttempts[id]);
+  DebugLog(PSTR("ID: %x, VIDPID: %lx\r\n"), id, vidpid);
+  
   //If VIDPID has changed, a different usb device was plugged into this slot. Load Map!
   if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || (currentMaps[id] != NULL && currentMaps[id]->vidpid != vidpid)) {
 
@@ -1048,6 +1056,9 @@ void setup() {
 }
 
 void loop() {
+  //fs_clear();
+  //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
+
   while (true) {
     //Poll the USB devices
     Usb.Task();

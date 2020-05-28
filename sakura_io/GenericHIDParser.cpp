@@ -15,7 +15,7 @@ GenericHID::GenericHID(USB *p) : HIDUniversal(p) {
 }
   
 uint32_t GenericHID::getVIDPID() {
-  return (VID << 16) | PID;
+  return ((uint32_t)VID << 16) | PID;
 }
 
 uint64_t GenericHID::getLastResponse() {
