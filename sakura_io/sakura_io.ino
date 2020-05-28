@@ -15,12 +15,16 @@
 #include "sakEEPROM.h"
 #include "GenericHIDParser.h"
 
+#define JvsSerial Serial
+#define PcSerial debugSerial
+
 //Debug Flag (Adds/Removes log code)
 #if 1
 #define DEBUG
 #include <AltSoftSerial.h>
 AltSoftSerial debugSerial;
 char debugBuffer[100];
+#define DebugSerial debugSerial
 #define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); debugSerial.print(debugBuffer)
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
@@ -443,17 +447,17 @@ void processMapManager() {
   byte resultCode;
   unsigned int resultSize;
 
-  if (Serial.available()) {
-    byte huh = Serial.read();
+  if (PcSerial.available()) {
+    byte huh = PcSerial.read();
     if (huh == '!') {
-      byte sizeLO = Serial.read();
-      byte sizeHI = Serial.read();
+      byte sizeLO = PcSerial.read();
+      byte sizeHI = PcSerial.read();
 
       unsigned int packetSize = sizeHI << 8 | sizeLO;
-      byte opcode = Serial.read();
-      byte checksum = Serial.read();
+      byte opcode = PcSerial.read();
+      byte checksum = PcSerial.read();
 
-      Serial.readBytes(packetBytes, packetSize);
+      PcSerial.readBytes(packetBytes, packetSize);
 
       //Checksum
       byte testChecksum = 0;
@@ -462,8 +466,8 @@ void processMapManager() {
 
       if (checksum != testChecksum) {
         resultCode = 'Y';
-        Serial.write(resultCode);
-        Serial.write(resultCode ^ '!');
+        PcSerial.write(resultCode);
+        PcSerial.write(resultCode ^ '!');
         return;
       }
 
@@ -506,13 +510,13 @@ void processMapManager() {
       }
 
       //Write out the result code and any data if needed.
-      Serial.write(resultCode);
-      Serial.write(resultCode ^ '!');
+      PcSerial.write(resultCode);
+      PcSerial.write(resultCode ^ '!');
       if (resultCode == '?') {
-        Serial.write(resultSize);
-        Serial.write(packetBytes, resultSize);
-        Serial.write('O');
-        Serial.write('O' ^ '!');
+        PcSerial.write(resultSize);
+        PcSerial.write(packetBytes, resultSize);
+        PcSerial.write('O');
+        PcSerial.write('O' ^ '!');
       }
     }
   }
@@ -660,11 +664,11 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
    Blocking reads one byte from the serial link, handling the escape byte case.
 */
 byte jvsReadByte() {
-  while (!Serial.available());
-  byte in = Serial.read();
+  while (!JvsSerial.available());
+  byte in = JvsSerial.read();
   if (in == ESCAPE) {
-    while (!Serial.available());
-    in = Serial.read() + 1;
+    while (!JvsSerial.available());
+    in = JvsSerial.read() + 1;
   }
   delayMicroseconds(10);
   return in;
@@ -713,7 +717,7 @@ short rcvPacket(byte* dataBuffer) {
     //Read data
     byte numBytes = jvsReadByte();
 
-    Serial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
+    JvsSerial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
 
     //Test checksum
     byte checksum = dataBuffer[numBytes - 1];
@@ -745,15 +749,15 @@ void sendResponse(byte statusCode, byte payloadSize) {
 
   //Write out
   jvsSetDirectionTX();
-  Serial.write(SYNC);                           //SYNC Byte
-  Serial.write(0x00);                           //Node Num (always 0)
-  Serial.write(payloadSize);                    //Num Bytes
-  Serial.write(statusCode);                     //Status
+  JvsSerial.write(SYNC);                           //SYNC Byte
+  JvsSerial.write(0x00);                           //Node Num (always 0)
+  JvsSerial.write(payloadSize);                    //Num Bytes
+  JvsSerial.write(statusCode);                     //Status
   for (int i = 0; i < payloadSize - 2; i++) {
-    Serial.write(resultBuffer[i]);
+    JvsSerial.write(resultBuffer[i]);
     delayMicroseconds(50);
   }
-  Serial.write(checksum);                       //Checksum
+  JvsSerial.write(checksum);                       //Checksum
 
   delayMicroseconds((payloadSize + 2) * 100);
   jvsSetDirectionRX();
@@ -955,7 +959,7 @@ void processJVS() {
   //Wait for SYNC byte
   lastJVSMillis = millis();
 
-  while (Serial.read() != SYNC) {
+  while (JvsSerial.read() != SYNC) {
     //Timeout so it doesn't get lock execution.
     if (millis() - lastJVSMillis >= JVS_TIMEOUT)
       return;
@@ -1017,7 +1021,7 @@ void processJVS() {
 
 void setup() {
 #ifdef DEBUG
-  debugSerial.begin(9600);
+  DebugSerial.begin(9600);
 #endif
   DebugLog(PSTR("Sakura I/O Board; a JVS to USB adapter.\r\n"));
 
