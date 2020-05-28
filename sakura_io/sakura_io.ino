@@ -233,7 +233,7 @@ short coinCounts[] = {10, 10};
    Map Storage:
      numMaps (1 byte)
      [Repeat *numMaps]
-     UID (4 bytes)
+     vidpid (4 bytes)
      Offset (2 byte)
 
    Map Entry:
@@ -242,49 +242,95 @@ short coinCounts[] = {10, 10};
      mapData (x bytes)
 */
 
-void fs_addMap(unsigned long uid, char* mapName, const byte* mapData, byte mapDataSize) {
+void fs_addMap(uint32_t vidpid, const char* mapName, const byte* mapData, byte mapDataSize) {
   byte numMappings;
-  unsigned short lastMapOffset;
+  uint16_t lastMapOffset;
   byte lastMapSize;
 
   //Get the last offset, and add it's size for the total entry. Note: deleted maps MUST be followed by
   //a defragmentation or this won't work.
-  sakEEPROM_Read(0, numMappings);
-  sakEEPROM_Read(1 + ((numMappings - 1) * 6) + 4, lastMapOffset);
-  sakEEPROM_Read(lastMapOffset + 0xF, lastMapSize);
+  EEPROM.get(0, numMappings);
+  if ((numMappings & 0xF0) != 0xA0) //Mappings were corrupted or need to init
+    numMappings = 0;
+  else
+    numMappings &= 0xF;
+
+  //Check if vidpid exists, delete if it does
+  for (int i = 0; i < numMappings; i++) {
+    uint32_t readVidpid;
+    EEPROM.get(1 + (i * 6), readVidpid);
+    if (vidpid == readVidpid) {
+      DebugLog(PSTR("Mapping already exists, deleting first.\r\n"));
+      fs_deleteMap(i);
+      EEPROM.get(0, numMappings); //Reload mapping count
+      break;
+    }
+  }
+
+  if (numMappings != 0) {
+    EEPROM.get(1 + ((numMappings - 1) * 6) + 4, lastMapOffset);
+    EEPROM.get(lastMapOffset + 0xF, lastMapSize);
+  }
 
   //Write out the new entry
-  unsigned int newOffset = lastMapOffset + 0x10 + lastMapSize;
-  int nameLength = strlen(mapName);
-  sakEEPROM_WriteBytes(newOffset, mapName, nameLength <= 0xF ? nameLength : 0xF);
-  sakEEPROM_Write(newOffset + 0xF, mapDataSize);
-  sakEEPROM_WriteBytes(newOffset + 0x10, mapData, mapDataSize);
+  uint32_t newOffset = numMappings != 0 ? lastMapOffset + 0x10 + lastMapSize : 0x100;
+  int nameLength = strlen(mapName) + 1;
+  sakEEPROM_writeBytes(newOffset, mapName, nameLength <= 0xF ? nameLength : 0xF);
+  EEPROM.put(newOffset + 0xE, 0);
+  EEPROM.put(newOffset + 0xF, mapDataSize);
+  sakEEPROM_writeBytes(newOffset + 0x10, mapData, mapDataSize);
 
   //Write the header entry
-  sakEEPROM_Write(1 + (numMappings * 6), uid);
-  sakEEPROM_Write(1 + (numMappings * 6) + 4, newOffset);
+  EEPROM.put(1 + (numMappings * 6), vidpid);
+  EEPROM.put(1 + (numMappings * 6) + 4, newOffset);
+
+  //Update mapping count
+  EEPROM.put(0, (byte)(0xA0 | ++numMappings));
 }
 
 void fs_deleteMap(int index) {
   byte numMappings;
-  sakEEPROM_Read(0, numMappings);
+  EEPROM.get(0, numMappings);
+  if ((numMappings & 0xF0) != 0xA0) //Mappings were corrupted or need to init
+  {
+    numMappings = 0;
+    return;
+  }
+  else
+    numMappings &= 0xF;
 
-  //Copy each entry to the last spot
-  for (byte i = numMappings - index; i < numMappings; i++) {
-    unsigned long uid;
-    unsigned int offset;
+  if (index - 1 >= numMappings)
+    return;
 
-    sakEEPROM_Read(1 + (i * 6), uid);
-    sakEEPROM_Read(1 + (i * 6) + 4, offset);
-    sakEEPROM_Write(1 + ((i - 1) * 6), uid);
-    sakEEPROM_Write(1 + ((i - 1) * 6) + 4, offset);
+  if (index != numMappings - 1) {
+    uint32_t oldOffset;
+    EEPROM.get(1 + (index * 6) + 4, oldOffset);
+
+    //Copy each entry to the last spot
+    for (byte i = index + 1; i < numMappings; i++) {
+      uint32_t vidpid;
+      uint16_t offset;
+      uint8_t totalSize;
+
+      EEPROM.get(1 + (i * 6), vidpid);
+      EEPROM.get(1 + (i * 6) + 4, offset);
+      EEPROM.put(1 + ((i - 1) * 6), vidpid);
+      EEPROM.put(1 + ((i - 1) * 6) + 4, oldOffset);
+
+      EEPROM.get(offset + 0xF, totalSize);
+      totalSize += 0x10;
+
+      for (int i = 0; i < totalSize; i++) {
+        EEPROM.update(oldOffset++, EEPROM.read(offset + i));
+      }
+    }
   }
 
-  fs_defragRom();
+  EEPROM.update(0, 0xA0 | (numMappings - 1));
 }
 
-void fs_defragRom() {
-
+void fs_clear() {
+  EEPROM.update(0, 0xA0);
 }
 
 int fs_loadMap(uint32_t vidpid, Map** newMap) {
@@ -293,6 +339,52 @@ int fs_loadMap(uint32_t vidpid, Map** newMap) {
   unsigned int offset;
   byte mapSize;
 
+  //LOAD MAP
+  EEPROM.get(0, numMappings);
+  for (byte i = 0; i < numMappings; i++) {
+    EEPROM.get(1 + (i * 6), readVIDPID);
+    if (vidpid == readVIDPID) {
+      *newMap = (Map*) malloc(sizeof(Map));
+
+      if (*newMap == NULL) //OUT OF MEMORY
+        return -1;
+
+      EEPROM.get(1 + (i * 6) + 4, offset);
+      EEPROM.get(offset + 0xF, mapSize);
+      sakEEPROM_readBytes(offset + 0x10, (*newMap)->data, mapSize);
+
+      (*newMap)->vidpid = vidpid;
+      (*newMap)->size = mapSize;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+#ifdef DEBUG
+void fs_printROM(int numPages) {
+  byte data[0x100];
+
+  int hexReset = 0;
+  int hexCount = 0;
+  DebugLog(PSTR("\r\n0x%02x: "), hexCount);
+  for (int j = 0; j < numPages; j++) {
+    sakEEPROM_readBytes(j * 0x100, data, 0x100);
+    for (int i = 0; i < 0x100; i++) {
+      DebugLog(PSTR("0x%02x "), data[i]);
+
+      if (++hexReset == 0x10) {
+        DebugLog(PSTR("\r\n0x%02x: "), hexCount + 1);
+        hexReset = 0;
+      }
+
+      hexCount++;
+    }
+  }
+}
+#endif
+
+int loadMap(uint32_t vidpid, Map** newMap) {
   int loadedMapIndex = -1;
   for (int i = 0; i < MAX_INPUTS; i++) {
     if (loadedMaps[i] == NULL) {
@@ -305,27 +397,10 @@ int fs_loadMap(uint32_t vidpid, Map** newMap) {
   if (loadedMapIndex == -1)
     return -2;
 
-  //LOAD MAP
-  sakEEPROM_Read(0, numMappings);
-  for (byte i = 0; i < numMappings; i++) {
-    sakEEPROM_Read(1 + (i * 6), readVIDPID);
-    if (vidpid == readVIDPID) {
-      *newMap = (Map*) malloc(sizeof(Map));
-      sakEEPROM_Read(1 + (i * 6) + 4, offset);
-      sakEEPROM_Read(offset + 0xF, mapSize);
-      sakEEPROM_ReadBytes(offset + 0x10, (*newMap)->data, mapSize);
+  int rcode = fs_loadMap(vidpid, newMap);
+  loadedMaps[loadedMapIndex] = *newMap;
 
-      (*newMap)->vidpid = vidpid;
-      (*newMap)->size = mapSize;
-
-      loadedMaps[loadedMapIndex] = *newMap;
-
-      return 1;
-    }
-  }
-
-  //MAP NOT FOUND FOR VIDPID
-  return -1;
+  return rcode;
 }
 
 void freeMap(Map* toFree) {
@@ -400,14 +475,14 @@ void processMapManager() {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
             memcpy(mapName, &packetBytes + 4, 0xF);
             byte mapDataSize = packetBytes[0x10];
-            addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
+            fs_addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
             resultCode = 'O';
             break;
           }
         //Delete Map
         case 3: {
             unsigned long uid = ((unsigned long*)&packetBytes)[0];
-            deleteMap(uid);
+            fs_deleteMap(uid);
             resultCode = 'O';
             break;
           }
@@ -459,13 +534,19 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   GenericHID* thisHid = (GenericHID*) hid;
   uint32_t vidpid = thisHid->getVIDPID();
 
+  DebugLog(PSTR("ID: %x, VIDPID: %x\r\n"), id, vidpid);
+  DebugLog(PSTR("Last Attempt: %x\r\n"), lastLoadAttempts[id]);
   //If VIDPID has changed, a different usb device was plugged into this slot. Load Map!
-  if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || currentMaps[id]->vidpid != vidpid) {
+  if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || (currentMaps[id] != NULL && currentMaps[id]->vidpid != vidpid)) {
+
+    DebugLog(PSTR("New Map Needed\r\n"));
+
     //Check if map is already loaded
     Map* newMap = NULL;
     for (int i = 0; i < MAX_INPUTS; i++) {
-      if (vidpid = loadedMaps[i]->vidpid) {
+      if (loadedMaps[i] != NULL && vidpid == loadedMaps[i]->vidpid) {
         newMap = loadedMaps[i];
+        DebugLog(PSTR("Map already loaded\r\n"));
         break;
       }
     }
@@ -474,14 +555,25 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
     if (newMap == NULL) {
       free(currentMaps[id]);
       int loaded = loadMap(vidpid, &newMap);
+      DebugLog(PSTR("Loading new map %d\r\n"), loaded);
       //If loaded, assign the map. Otherwise it stays unassigned.
-      if (loaded) 
+      if (loaded == 1)
         currentMaps[id] = newMap;
-      else
+      else {
         lastLoadAttempts[id] = vidpid;
+        DebugLog(PSTR("Last Attempt SET: %x\r\n"), lastLoadAttempts[id]);
+        if (loaded == -1) {
+          DebugLog(PSTR("ERROR: Cannot load map, out of memory!\r\n"));
+        }
+      }
     }  else {
       currentMaps[id] = newMap; //Otherwise set to this map;
     }
+  }
+
+  if (currentMaps[id] == NULL) {
+    DebugLog(PSTR("No map loaded....\r\n-----------------\r\n"));
+    return;
   }
 
   //Handle map/input reading
@@ -953,9 +1045,6 @@ void setup() {
     Hid2.SetReportParser(1, &genericHIDParser1);
   }
   DebugLog(PSTR("Sakura I/O Initialized!\r\n"));
-
-  //currentMaps[0] = testMap;
-  //mapLength[0] = 45;
 }
 
 void loop() {
