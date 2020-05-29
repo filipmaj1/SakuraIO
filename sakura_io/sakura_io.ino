@@ -16,7 +16,7 @@
 #include "GenericHIDParser.h"
 
 #define JvsSerial Serial
-#define PcSerial debugSerial
+#define PcSerial Serial
 
 //Debug Flag (Adds/Removes log code)
 #if 1
@@ -337,19 +337,48 @@ void fs_clear() {
   EEPROM.update(0, 0xA0);
 }
 
+uint16_t fs_getMap(byte* buff, int index) {
+  uint8_t numMappings;
+  uint32_t readVIDPID;
+  uint16_t offset;
+  unsigned char mapName[0xF];
+  uint8_t mapSize;
+
+  //LOAD MAP
+  EEPROM.get(0, numMappings);
+  if (index >= numMapping) {
+    return 0;
+  }
+  EEPROM.get(1 + (index * 6), (uint32_t*)buff); //VIDPID
+  EEPROM.get(1 + (index * 6) + 4, offset); //OFFSET
+
+  for (int i = 0; i < 0xF; i++) {
+    char charVal;
+    EEPROM.get(offset, charVal);
+    buff[4 + i] = charVal;
+    if (charVal == 0)
+      break;
+  }
+
+  EEPROM.get(offset + 0xF, buff + 4 + 0xF);
+  sakEEPROM_readBytes(offset + 0x10, buff + 0x4 + 0x10, buff[0x4 + 0xF]);
+
+  return buff[0x4 + 0xF];
+}
+
 int fs_loadMap(uint32_t vidpid, Map** newMap) {
   uint8_t numMappings;
   uint32_t readVIDPID;
   uint16_t offset;
   uint8_t mapSize;
-  
+
   //LOAD MAP
   EEPROM.get(0, numMappings);
   for (byte i = 0; i < numMappings; i++) {
     EEPROM.get(1 + (i * 6), readVIDPID);
     //Found
     if (vidpid == readVIDPID) {
-      *newMap = (Map*) malloc(sizeof(Map));      
+      *newMap = (Map*) malloc(sizeof(Map));
 
       if (*newMap == NULL) //OUT OF MEMORY
         return -1;
@@ -360,7 +389,7 @@ int fs_loadMap(uint32_t vidpid, Map** newMap) {
       sakEEPROM_readBytes(offset + 0x10, (*newMap)->data, mapSize);
 
       (*newMap)->vidpid = vidpid;
-      (*newMap)->size = mapSize;    
+      (*newMap)->size = mapSize;
 
       return 1;
     }
@@ -410,7 +439,7 @@ int loadMap(uint32_t vidpid, Map** newMap) {
     loadedMaps[loadedMapIndex] = *newMap;
 
   DebugLog(PSTR("Map Indx = %d\r\n"), loadedMapIndex);
-  
+
   return rcode;
 }
 
@@ -445,26 +474,37 @@ void processMapManager() {
   byte packetBytes[0x100];
   char mapName[0xF];
   byte resultCode;
-  unsigned int resultSize;
+  uint16_t resultSize = 0;
 
   if (PcSerial.available()) {
     byte huh = PcSerial.read();
+
     if (huh == '!') {
-      byte sizeLO = PcSerial.read();
-      byte sizeHI = PcSerial.read();
+      byte header[4];
+      PcSerial.readBytes(header, 4);
+
+      byte opcode = header[0];
+      byte sizeLO = header[1];
+      byte sizeHI = header[2];
+      byte checksum = header[3];
 
       unsigned int packetSize = sizeHI << 8 | sizeLO;
-      byte opcode = PcSerial.read();
-      byte checksum = PcSerial.read();
 
       PcSerial.readBytes(packetBytes, packetSize);
 
+      DebugLog(PSTR("Op: %x\r\n"), opcode);
+      DebugLog(PSTR("Size: %x\r\n"), packetSize);
+      DebugLog(PSTR("checksum: %x\r\n"), checksum);
+
       //Checksum
       byte testChecksum = 0;
-      for (int i = 0; i < packetSize; i++)
+      for (int i = 0; i < packetSize; i++) {
         testChecksum += packetBytes[i];
+        DebugLog(PSTR("%x\r\n"), testChecksum);
+      }
 
       if (checksum != testChecksum) {
+        DebugLog(PSTR("checksum failed: %x\r\n"), testChecksum);
         resultCode = 'Y';
         PcSerial.write(resultCode);
         PcSerial.write(resultCode ^ '!');
@@ -480,21 +520,26 @@ void processMapManager() {
           }
         //Get Maps
         case 1: {
-
+            resultSize = fs_getMap(packetBytes, packetBytes[0]);
+            if (resultSize == 0)
+              resultCode = 'O';
+            else
+              resultCode = '?';
           }
         //Add Map
         case 2: {
-            unsigned long uid = ((unsigned long*)&packetBytes)[0];
-            memcpy(mapName, &packetBytes + 4, 0xF);
-            byte mapDataSize = packetBytes[0x10];
-            fs_addMap(uid, mapName, (const byte*) &packetBytes + 0x10, mapDataSize);
+            uint32_t vidpid = ((uint32_t*)&packetBytes)[0];
+            memcpy(mapName, packetBytes + 4, 0xF);
+            byte mapDataSize = packetBytes[0x4 + 0xF];
+            //DebugLog(PSTR("Got add: vidpid: %lx, name: %s, mapsize: %d\r\n"), vidpid, mapName, mapDataSize);
+            fs_addMap(vidpid, mapName, (const byte*) packetBytes + 0x14, mapDataSize);
             resultCode = 'O';
             break;
           }
         //Delete Map
         case 3: {
-            unsigned long uid = ((unsigned long*)&packetBytes)[0];
-            fs_deleteMap(uid);
+            uint32_t vidpid = ((uint32_t*)packetBytes)[0];
+            fs_deleteMap(vidpid);
             resultCode = 'O';
             break;
           }
@@ -505,8 +550,14 @@ void processMapManager() {
             resultSize = strlen(IDENTIFICATION) + 1;
             resultCode = '?';
           }
-        default:
-          resultCode = 'X';
+        //Clear
+        case 5: {
+            fs_clear();
+            resultCode = 'O';
+          }
+        default: {
+            resultCode = 'X';
+          }
       }
 
       //Write out the result code and any data if needed.
@@ -547,7 +598,7 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   uint32_t vidpid = thisHid->getVIDPID();
 
   DebugLog(PSTR("ID: %x, VIDPID: %lx\r\n"), id, vidpid);
-  
+
   //If VIDPID has changed, a different usb device was plugged into this slot. Load Map!
   if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || (currentMaps[id] != NULL && currentMaps[id]->vidpid != vidpid)) {
 
@@ -1064,10 +1115,16 @@ void loop() {
   //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
 
   while (true) {
+
+    //if (PcSerial.available()) {
+    //  DebugLog(PSTR("%x "), PcSerial.read());
+    //}
+    processMapManager();
+
     //Poll the USB devices
-    Usb.Task();
+    //Usb.Task();
 
     //Process a JVS Packet
-    processJVS();
+    //processJVS();
   }
 }
