@@ -45,6 +45,9 @@ char debugBuffer[100];
 //CONFIGURATION
 ///////////////
 
+#define AVR_EEPROM_SIZE 1024
+#define MAP_DATA_START  0x60
+
 //Pin Assignments
 #define PIN_JVS_DIR     2
 #define PIN_BUS_TERM    3
@@ -221,6 +224,7 @@ byte lastResultSize = 0;
 //Arcade State (Input, Output, Coins)
 byte systemSwitches = 0;
 unsigned int playerSwitches[] = {0x0, 0x0};
+unsigned int playerAnalogs[2][8] = {{0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}, {0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}};
 byte coinStatus = 0x0;
 short coinCounts[] = {10, 10};
 
@@ -277,7 +281,7 @@ void fs_addMap(uint32_t vidpid, const char* mapName, const byte* mapData, byte m
   }
 
   //Write out the new entry
-  uint32_t newOffset = numMappings != 0 ? lastMapOffset + 0x10 + lastMapSize : 0x100;
+  uint32_t newOffset = numMappings != 0 ? lastMapOffset + 0x10 + lastMapSize : MAP_DATA_START;
   int nameLength = strlen(mapName) + 1;
   sakEEPROM_writeBytes(newOffset, mapName, nameLength <= 0xF ? nameLength : 0xF);
   EEPROM.put(newOffset + 0xE, 0);
@@ -303,7 +307,7 @@ void fs_deleteMap(int index) {
   else
     numMappings &= 0xF;
 
-  if (index - 1 >= numMappings)
+  if (index >= numMappings)
     return;
 
   if (index != numMappings - 1) {
@@ -346,21 +350,27 @@ uint16_t fs_getMap(byte* buff, int index) {
 
   //LOAD MAP
   EEPROM.get(0, numMappings);
-  if (index >= numMapping) {
+  if ((numMappings & 0xF0) != 0xA0) //Mappings were corrupted or need to init
+    numMappings = 0;
+  else
+    numMappings &= 0xF;
+
+  if (index >= numMappings) {
     return 0;
   }
-  EEPROM.get(1 + (index * 6), (uint32_t*)buff); //VIDPID
+  
+  EEPROM.get(1 + (index * 6), ((uint32_t*)buff)[0]); //VIDPID
   EEPROM.get(1 + (index * 6) + 4, offset); //OFFSET
 
   for (int i = 0; i < 0xF; i++) {
     char charVal;
-    EEPROM.get(offset, charVal);
+    EEPROM.get(offset + i, charVal);
     buff[4 + i] = charVal;
     if (charVal == 0)
       break;
   }
 
-  EEPROM.get(offset + 0xF, buff + 4 + 0xF);
+  EEPROM.get(offset + 0xF, buff[4 + 0xF]);
   sakEEPROM_readBytes(offset + 0x10, buff + 0x4 + 0x10, buff[0x4 + 0xF]);
 
   return buff[0x4 + 0xF];
@@ -395,6 +405,28 @@ int fs_loadMap(uint32_t vidpid, Map** newMap) {
     }
   }
   return 0;
+}
+
+uint16_t fs_getUsedSpace() {
+  uint8_t numMappings;
+  uint16_t offset;
+  uint8_t mapSize;
+  uint16_t totalSize = MAP_DATA_START;
+
+  //LOAD MAP
+  EEPROM.get(0, numMappings);
+  if ((numMappings & 0xF0) != 0xA0) //Mappings were corrupted or need to init
+    numMappings = 0;
+  else
+    numMappings &= 0xF;
+
+  for (int i = 0; i < numMappings; i++) {
+    EEPROM.get(1 + (i * 6) + 4, offset);
+    EEPROM.get(offset + 0xF, mapSize);
+    totalSize += mapSize + 0x10;
+  }
+
+  return totalSize;
 }
 
 #ifdef DEBUG
@@ -492,19 +524,13 @@ void processMapManager() {
 
       PcSerial.readBytes(packetBytes, packetSize);
 
-      DebugLog(PSTR("Op: %x\r\n"), opcode);
-      DebugLog(PSTR("Size: %x\r\n"), packetSize);
-      DebugLog(PSTR("checksum: %x\r\n"), checksum);
-
       //Checksum
       byte testChecksum = 0;
       for (int i = 0; i < packetSize; i++) {
         testChecksum += packetBytes[i];
-        DebugLog(PSTR("%x\r\n"), testChecksum);
       }
 
       if (checksum != testChecksum) {
-        DebugLog(PSTR("checksum failed: %x\r\n"), testChecksum);
         resultCode = 'Y';
         PcSerial.write(resultCode);
         PcSerial.write(resultCode ^ '!');
@@ -523,8 +549,11 @@ void processMapManager() {
             resultSize = fs_getMap(packetBytes, packetBytes[0]);
             if (resultSize == 0)
               resultCode = 'O';
-            else
+            else {
+              resultSize += 0x14; 
               resultCode = '?';
+            }
+            break;
           }
         //Add Map
         case 2: {
@@ -537,23 +566,33 @@ void processMapManager() {
             break;
           }
         //Delete Map
-        case 3: {
-            uint32_t vidpid = ((uint32_t*)packetBytes)[0];
-            fs_deleteMap(vidpid);
+        case 3: {            
+            uint8_t index = packetBytes[0];            
+            fs_deleteMap(index);
             resultCode = 'O';
             break;
           }
         //Get Info
         case 4: {
-            memcpy(packetBytes, IDENTIFICATION, strlen(IDENTIFICATION));
-            packetBytes[strlen(IDENTIFICATION) + 1] = 0;
-            resultSize = strlen(IDENTIFICATION) + 1;
+            uint16_t used, total;
+
+            used = fs_getUsedSpace();
+            total = AVR_EEPROM_SIZE;
+
+            uint8_t strSize = strlen_P(IDENTIFICATION);
+            memcpy_P(packetBytes, IDENTIFICATION, strSize);
+            int writeSize = sprintf_P(packetBytes + strSize, PSTR(";%d;%d"), used, total);
+            packetBytes[strSize + writeSize] = 0;
+            
+            resultSize = strSize + writeSize;
             resultCode = '?';
+            break;
           }
         //Clear
         case 5: {
             fs_clear();
             resultCode = 'O';
+            break;
           }
         default: {
             resultCode = 'X';
@@ -566,12 +605,28 @@ void processMapManager() {
       if (resultCode == '?') {
         PcSerial.write(resultSize);
         PcSerial.write(packetBytes, resultSize);
-        PcSerial.write('O');
-        PcSerial.write('O' ^ '!');
       }
+      PcSerial.flush();
     }
   }
 }
+
+/* JVS DEST POSITIONS (http://superusr.free.fr/arcade/JVS/JVST_VER3.pdf)
+   START    - 7
+   SERVICE  - 6
+   UP       - 5
+   DOWN     - 4
+   LEFT     - 3
+   RIGHT    - 2
+   B1       - 1
+   B2       - 0
+   B3       - 15
+   B4       - 14
+   B5       - 13
+   B6       - 12
+   B7       - 11
+   B8       - 10
+*/
 
 //8 button map
 byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
@@ -587,6 +642,34 @@ byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
                   USB_TYPE_BUTTON, 0x0B, 255,
                   USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
                  };
+
+//6 button map (Tom's Arcade Stick)
+byte tomStick6Btn[] = {
+  USB_TYPE_BUTTON, 0x00, 1,   //B1
+  USB_TYPE_BUTTON, 0x01, 14,  //B5
+  USB_TYPE_BUTTON, 0x02, 13,  //B6
+  USB_TYPE_BUTTON, 0x03, 0,   //B2
+  USB_TYPE_BUTTON, 0x04, 255, //B4
+  USB_TYPE_BUTTON, 0x05, 15,  //B3
+  USB_TYPE_BUTTON, 0x06, 255, //B8
+  USB_TYPE_BUTTON, 0x07, 12,  //B7
+  USB_TYPE_BUTTON, 0x08, 6,   //SELECT
+  USB_TYPE_BUTTON, 0x09, 7,   //START
+  USB_TYPE_BUTTON, 0x0C, 255, //HOME
+  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT, //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+  USB_TYPE_AXIS, 0x18, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0,
+  USB_TYPE_AXIS, 0x20, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 1,
+  USB_TYPE_AXIS, 0x28, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 2,
+  USB_TYPE_AXIS, 0x30, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 3
+};
+
+/*
+   Analog
+   24th bit (0x18), 1 Byte, LS X AXIS (Pointer)(0, 80, FF)
+   32th bit (0x20), 1 Byte, LS Y AXIS (Pointer)(0, 80, FF)
+   40th bit (0x28), 1 Byte, RS X AXIS (Slide)(0, 80, FF, 7F when OFF)
+   48th bit (0x30), 1 Byte, RS Y AXIS (Slide)(0, 80, FF, 7F when OFF)
+*/
 
 /*~~~~~~~~~~~~~~~~~~USB CODE~~~~~~~~~~~~~~~~~~*/
 
@@ -698,15 +781,30 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
         }
       }
       i += innerMapLen * 2;
+      i--;
     }
     //Analog
     else if (type == USB_TYPE_AXIS) {
-      DebugLog(PSTR("ERROR: AXIS NOT SUPPORTED, aborting usb...\r\n"));
-      return;
+      uint32_t* intBuffer = (uint32_t*)(currentMaps[id]->data + i);
+      uint32_t valueMask = intBuffer[0];
+      uint32_t minVal = intBuffer[1];
+      uint32_t maxVal = intBuffer[2];
+      i += 12;
+      byte channel = currentMaps[id]->data[i];
+
+      intBuffer = (uint32_t*)(buff + bytePosition);
+      uint32_t value = (intBuffer[0] >> remainder) & valueMask;
+
+      playerAnalogs[playerIndex][channel] = scaleToJVS(value, minVal, maxVal);
     }
   }
 
   DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
+  DebugLog(PSTR("Analog: 0x%x, 0x%x, 0x%x, 0x%x\r\n"), playerAnalogs[playerIndex][0], playerAnalogs[playerIndex][1], playerAnalogs[playerIndex][2], playerAnalogs[playerIndex][3]);
+}
+
+uint16_t scaleToJVS(uint32_t value, uint32_t usbMin, uint32_t usbMax) {
+  return 0xFFFF * (value - usbMin) / (usbMax - usbMin);
 }
 
 /*~~~~~~~~~~~~~~~~~~JVS CODE~~~~~~~~~~~~~~~~~~*/
@@ -1113,16 +1211,15 @@ void setup() {
 void loop() {
   //fs_clear();
   //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
+  //fs_addMap(0x07388838, "Tom's Stick", tomStick6Btn, 113);
+  //fs_printROM(2);
 
   while (true) {
-
-    //if (PcSerial.available()) {
-    //  DebugLog(PSTR("%x "), PcSerial.read());
-    //}
+    //Process PC serial if needed
     processMapManager();
 
     //Poll the USB devices
-    //Usb.Task();
+    Usb.Task();
 
     //Process a JVS Packet
     //processJVS();
