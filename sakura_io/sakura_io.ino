@@ -58,18 +58,18 @@ char debugBuffer[100];
 #define JVS_RX          LOW
 
 //Identification
-const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v0.01;By Filip Maj\0"};
+const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O (Arduino);v1.0a;By Filip Maj\0"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
 
 //Capabilities of this I/O device
-const byte test_functions[] PROGMEM = {
-  0x01, 0x02, 0x0D, 0x00, //Two Players, 12 Buttons each
+const byte JVS_FUNCTIONS[] PROGMEM = {
+  0x01, 0x02, 0x0E, 0x00, //Two Players, 14 Buttons each
   0x02, 0x02, 0x00, 0x00, //Two Coin slots
   0x03, 0x08, 0x00, 0x00, //Eight Analog inputs
   0x12, 0x06, 0x00, 0x00, //General Purpose Output Driver
-  0x00         //Terminator
+  0x00                    //Terminator
 };
 
 #define JVS_TIMEOUT 15
@@ -226,7 +226,7 @@ byte systemSwitches = 0;
 unsigned int playerSwitches[] = {0x0, 0x0};
 unsigned int playerAnalogs[2][8] = {{0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}, {0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}};
 byte coinStatus = 0x0;
-short coinCounts[] = {10, 10};
+short coinCounts[] = {0, 0};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -996,7 +996,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
     case OP_GET_FUNCTIONS: {
         *resultSize = 1 + 17;
         result[0] = REPORT_NORMAL;
-        memcpy_P(result + 1, test_functions, 17);
+        memcpy_P(result + 1, JVS_FUNCTIONS, 17);
         DebugLog(PSTR("Sent I/O Functions\r\n"));
         return REPORT_NORMAL;
       }
@@ -1055,14 +1055,12 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
       }
     case OP_INPUT_ANALOG: {
         byte numChannels = packet[1];
-        *readSize += 1;
 
         result[0] = REPORT_NORMAL;
-        for (int i = 0; i < numChannels; i++) {
-          result[1 + (i * 2)] = 0x80;
-          result[1 + (i * 2) + 1] = 0x00;
-        }
 
+        memcpy(result + 1, &playerAnalogs, 2 * numChannels);
+
+        *readSize += 1;
         *resultSize = 1 + (2 * numChannels);
 
         return REPORT_NORMAL;
@@ -1074,6 +1072,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
 
         byte cointSlot = packet[1];
         short subtraction = packet[2] << 8 | packet[3];
+        coinCount -= subtraction;
 
         DebugLog(PSTR("Got request to reduce coins by: %d.\r\n"), subtraction);
 
@@ -1183,8 +1182,7 @@ void setup() {
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
   JvsSerial.begin(115200);
   jvsSetDirectionRX();
-  //jvsSenseHigh();
-  jvsSenseLow();
+  jvsSenseHigh();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
@@ -1216,12 +1214,12 @@ void loop() {
 
   while (true) {
     //Process PC serial if needed
-    processMapManager();
+    //processMapManager();
 
     //Poll the USB devices
     Usb.Task();
 
     //Process a JVS Packet
-    //processJVS();
+    processJVS();
   }
 }
