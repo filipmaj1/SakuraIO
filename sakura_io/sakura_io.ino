@@ -628,8 +628,23 @@ void processMapManager() {
    B8       - 10
 */
 
+//6 button map
+byte testMap6Btn[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
+                  USB_TYPE_BUTTON, 0x01, 14,
+                  USB_TYPE_BUTTON, 0x02, 13,
+                  USB_TYPE_BUTTON, 0x03, 0,
+                  USB_TYPE_BUTTON, 0x04, 255,
+                  USB_TYPE_BUTTON, 0x05, 15,
+                  USB_TYPE_BUTTON, 0x06, 255,
+                  USB_TYPE_BUTTON, 0x07, 12,
+                  USB_TYPE_BUTTON, 0x08, 6,
+                  USB_TYPE_BUTTON, 0x09, 7,
+                  USB_TYPE_BUTTON, 0x0B, 255,
+                  USB_TYPE_HAT_SW, 0x10, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+                 };
+
 //8 button map
-byte testMap[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
+byte testMap8Btn[] = {USB_TYPE_BUTTON, 0x00, 1, //[Type][Bit Position][JVS Dest]
                   USB_TYPE_BUTTON, 0x01, 13,
                   USB_TYPE_BUTTON, 0x02, 12,
                   USB_TYPE_BUTTON, 0x03, 0,
@@ -1243,7 +1258,7 @@ void setup() {
 
 void loop() {
   //fs_clear();
-  //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
+  //fs_addMap(0x0F0D0040, "Hori Stick", testMap6Btn, 53);
   //fs_addMap(0x07388838, "Tom's Stick", tomStick6Btn, 113);
   //fs_addMap(0x7382215, "Hotas Test", hotas, 60);
   //fs_printROM(2);
