@@ -58,7 +58,7 @@ char debugBuffer[100];
 #define JVS_RX          LOW
 
 //Identification
-const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v1.0a;By Filip Maj\0"};
+const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v1.0a (Arduino Prototype);Created by Ioncannon"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
@@ -664,16 +664,16 @@ byte tomStick6Btn[] = {
 };
 
 byte hotas[] = {  
-  USB_TYPE_AXIS, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0,
-  USB_TYPE_AXIS, 0x10, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 1,
+  USB_TYPE_AXIS, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 1,
+  USB_TYPE_AXIS, 0x10, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0,
   USB_TYPE_AXIS, 0x20, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x0F, 0x00, 0x00, 2,
   // qrwUSB_TYPE_HAT_SW, 0x2C, 0b1111, 0, //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
   USB_TYPE_BUTTON, 0x30, 7,   //B1
   USB_TYPE_BUTTON, 0x31, 1,   //B2
   USB_TYPE_BUTTON, 0x32, 0,  //B3
   USB_TYPE_BUTTON, 0x33, 15,  //B4
-  USB_TYPE_BUTTON, 0x34, 14,  //B5
-  USB_TYPE_BUTTON, 0x35, 13,  //B6
+  USB_TYPE_BUTTON, 0x34, 6,  //B5
+  USB_TYPE_BUTTON, 0x35, 7,  //B6
 };
 
 //0x7382215
@@ -939,11 +939,12 @@ void sendResponse(byte statusCode, byte payloadSize) {
   JvsSerial.write(statusCode);                     //Status
   for (int i = 0; i < payloadSize - 2; i++) {
     JvsSerial.write(resultBuffer[i]);
-    delayMicroseconds(50);
   }
   JvsSerial.write(checksum);                       //Checksum
-
-  delayMicroseconds((payloadSize + 2) * 100);
+  JvsSerial.flush();
+  
+  delayMicroseconds(100);
+  
   jvsSetDirectionRX();
 }
 
@@ -955,6 +956,7 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
   *resultSize = 1;
 
   switch (packet[0]) {
+    //Unknown command send by Initial D 3.
     case 0: {
         DebugLog(PSTR("Wut\r\n"));
         DebugLog(PSTR("%x "), packet[0]);
@@ -999,12 +1001,11 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
       }
     //Initialization
     case OP_GET_IO_ID: {
-        byte idSize = strlen_P(IDENTIFICATION);
-        *resultSize = idSize + 2;
-        result[0] = REPORT_NORMAL;
+        byte idSize = strlen_P(IDENTIFICATION) + 1;
         memcpy_P(result + 1, IDENTIFICATION, idSize);
-        result[idSize + 2] = 0;
-        DebugLog(PSTR("Sent I/O ID: %S\r\n"), IDENTIFICATION);
+        result[idSize] = 0;
+        *resultSize = idSize + 1;
+        DebugLog(PSTR("Sent I/O ID\r\n"));
         return REPORT_NORMAL;
       }
     case OP_GET_CMD_VER: {
