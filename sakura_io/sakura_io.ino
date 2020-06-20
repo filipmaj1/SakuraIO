@@ -58,7 +58,7 @@ char debugBuffer[100];
 #define JVS_RX          LOW
 
 //Identification
-const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O (Arduino);v1.0a;By Filip Maj\0"};
+const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v1.0a;By Filip Maj\0"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
@@ -223,10 +223,10 @@ byte lastResultSize = 0;
 
 //Arcade State (Input, Output, Coins)
 byte systemSwitches = 0;
-unsigned int playerSwitches[] = {0x0, 0x0};
-unsigned int playerAnalogs[2][8] = {{0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}, {0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000}};
+uint16_t playerSwitches[] = {0x0000, 0x0000};
+uint16_t playerAnalogs[8] = {0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000};
 byte coinStatus = 0x0;
-short coinCounts[] = {0, 0};
+uint16_t coinCounts[] = {0x0000, 0x0000};
 
 #define setBit(val,nbit)   ((val) |=  (1<<(nbit)))
 #define clearBit(val,nbit) ((val) &= ~(1<<(nbit)))
@@ -663,6 +663,39 @@ byte tomStick6Btn[] = {
   USB_TYPE_AXIS, 0x30, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 3
 };
 
+byte hotas[] = {  
+  USB_TYPE_AXIS, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0,
+  USB_TYPE_AXIS, 0x10, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 1,
+  USB_TYPE_AXIS, 0x20, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x0F, 0x00, 0x00, 2,
+  USB_TYPE_HAT_SW, 0x2C, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT, //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+  USB_TYPE_BUTTON, 0x30, 1,   //B1
+  USB_TYPE_BUTTON, 0x31, 0,   //B2
+  USB_TYPE_BUTTON, 0x32, 15,  //B3
+  USB_TYPE_BUTTON, 0x33, 14,  //B4
+  USB_TYPE_BUTTON, 0x34, 13,  //B5
+  USB_TYPE_BUTTON, 0x35, 12,  //B6
+};
+
+//0x7382215
+//0: 2bytes, joy x
+//16: 2bytes, joy y
+//32: 1.5bytes, rudder
+//44: 1 byte, pov - hat
+//48: trigger button
+//49: a button
+//50: b button
+//51: c button
+//52: d button
+//53: e (pull) button
+//54: H1 Up 
+//55: H1 Right 
+//56: H1 Down 
+//57: H1 Left
+//58: H2 Up
+//59: H2 Right
+//60: H2 Down
+//61: H2 Left
+
 /*
    Analog
    24th bit (0x18), 1 Byte, LS X AXIS (Pointer)(0, 80, FF)
@@ -680,12 +713,14 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   GenericHID* thisHid = (GenericHID*) hid;
   uint32_t vidpid = thisHid->getVIDPID();
 
-  DebugLog(PSTR("ID: %x, VIDPID: %lx\r\n"), id, vidpid);
+  //debugSerial.print("XXXXXXXXXXXXXX");
+  //debugSerial.write(buff, len);
 
   //If VIDPID has changed, a different usb device was plugged into this slot. Load Map!
   if ((currentMaps[id] == NULL && lastLoadAttempts[id] != vidpid) || (currentMaps[id] != NULL && currentMaps[id]->vidpid != vidpid)) {
 
     DebugLog(PSTR("New Map Needed\r\n"));
+    DebugLog(PSTR("ID: %x, VIDPID: %lx\r\n"), id, vidpid);
 
     //Check if map is already loaded
     Map* newMap = NULL;
@@ -723,7 +758,7 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
   }
 
   //Handle map/input reading
-  int playerIndex = 0;
+  int playerIndex = id;
 
   for (int i = 0; i < currentMaps[id]->size; i++) {
     byte type = currentMaps[id]->data[i++];
@@ -795,12 +830,13 @@ void processUSB(int id, USBHID* hid, bool isRpt, uint8_t len, uint8_t* buff) {
       intBuffer = (uint32_t*)(buff + bytePosition);
       uint32_t value = (intBuffer[0] >> remainder) & valueMask;
 
-      playerAnalogs[playerIndex][channel] = scaleToJVS(value, minVal, maxVal);
+      uint16_t scaledValue = scaleToJVS(value, minVal, maxVal);
+      playerAnalogs[channel] = (scaledValue>>8) | (scaledValue<<8);
     }
   }
 
-  DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
-  DebugLog(PSTR("Analog: 0x%x, 0x%x, 0x%x, 0x%x\r\n"), playerAnalogs[playerIndex][0], playerAnalogs[playerIndex][1], playerAnalogs[playerIndex][2], playerAnalogs[playerIndex][3]);
+  //DebugLog(PSTR("Switches: %c%c%c%c%c%c%c%c %c%c%c%c%c%c%c%c\r\n"), BYTE_TO_BINARY((playerSwitches[playerIndex] >> 8) & 0xFF), BYTE_TO_BINARY(playerSwitches[playerIndex] & 0xFF));
+  //DebugLog(PSTR("Analog: 0x%x, 0x%x, 0x%x, 0x%x, 0x%x\r\n"), playerAnalogs[0], playerAnalogs[1], playerAnalogs[2], playerAnalogs[3], playerAnalogs[7]);
 }
 
 uint16_t scaleToJVS(uint32_t value, uint32_t usbMin, uint32_t usbMax) {
@@ -1070,9 +1106,9 @@ short parseCommand(const byte* packet, byte* readSize, byte* result, short* resu
         result[0] = REPORT_NORMAL;
         *readSize += 3;
 
-        byte cointSlot = packet[1];
+        byte coinSlot = packet[1];
         short subtraction = packet[2] << 8 | packet[3];
-        coinCount -= subtraction;
+        coinCounts[coinSlot] -= subtraction;
 
         DebugLog(PSTR("Got request to reduce coins by: %d.\r\n"), subtraction);
 
@@ -1182,7 +1218,7 @@ void setup() {
   DebugLog(PSTR("Starting JVS Serial Port...\r\n"));
   JvsSerial.begin(115200);
   jvsSetDirectionRX();
-  jvsSenseHigh();
+  jvsSenseLow();
 
   //Check if we are the last device. If so, turn on bus term.
   float voltage = jvsGetSenseVoltage();
@@ -1210,6 +1246,7 @@ void loop() {
   //fs_clear();
   //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
   //fs_addMap(0x07388838, "Tom's Stick", tomStick6Btn, 113);
+  //fs_addMap(0x7382215, "Hotas Test", hotas, 83);
   //fs_printROM(2);
 
   while (true) {
