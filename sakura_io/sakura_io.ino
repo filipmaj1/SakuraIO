@@ -667,13 +667,13 @@ byte hotas[] = {
   USB_TYPE_AXIS, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0,
   USB_TYPE_AXIS, 0x10, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 1,
   USB_TYPE_AXIS, 0x20, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x0F, 0x00, 0x00, 2,
-  USB_TYPE_HAT_SW, 0x2C, 0b1111, 8, 0, 5, 1, SW_UP_RIGHT, 2, 2, 3, SW_DOWN_RIGHT, 4, 4, 5, SW_DOWN_LEFT, 6, 3, 7, SW_UP_LEFT, //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
-  USB_TYPE_BUTTON, 0x30, 1,   //B1
-  USB_TYPE_BUTTON, 0x31, 0,   //B2
-  USB_TYPE_BUTTON, 0x32, 15,  //B3
-  USB_TYPE_BUTTON, 0x33, 14,  //B4
-  USB_TYPE_BUTTON, 0x34, 13,  //B5
-  USB_TYPE_BUTTON, 0x35, 12,  //B6
+  // qrwUSB_TYPE_HAT_SW, 0x2C, 0b1111, 0, //[Type][Bit Position][Length Mask][Hat Maps][Map Pairs (Value,JVS Dest)]
+  USB_TYPE_BUTTON, 0x30, 7,   //B1
+  USB_TYPE_BUTTON, 0x31, 1,   //B2
+  USB_TYPE_BUTTON, 0x32, 0,  //B3
+  USB_TYPE_BUTTON, 0x33, 15,  //B4
+  USB_TYPE_BUTTON, 0x34, 14,  //B5
+  USB_TYPE_BUTTON, 0x35, 13,  //B6
 };
 
 //0x7382215
@@ -896,14 +896,12 @@ byte jvsReadByte() {
    Returns: Bytes read if successful. -1 if checksum failed.
 */
 short rcvPacket(byte* dataBuffer) {
-  //Check if it's for us
+  //Read packet and check if it is for us
   byte targetNode = jvsReadByte();
+  byte numBytes = jvsReadByte();
+  JvsSerial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
+  
   if (targetNode == BROADCAST || targetNode == currentAddress) {
-    //Read data
-    byte numBytes = jvsReadByte();
-
-    JvsSerial.readBytes(dataBuffer, numBytes); //TODO: Change to jvsRead
-
     //Test checksum
     byte checksum = dataBuffer[numBytes - 1];
     byte testChecksum = targetNode + numBytes;
@@ -914,7 +912,8 @@ short rcvPacket(byte* dataBuffer) {
       return numBytes - 1;
     return SAK_CHECKSUM_FAIL;
   }
-  DebugLog(PSTR("\r\nIgnoring Packet.\r\n"));
+  
+  //DebugLog(PSTR("\r\nIgnoring Packet.\r\n"));
   return 0; //Not for us
 }
 
@@ -1150,7 +1149,6 @@ void processJVS() {
   }
 
   short result = rcvPacket(dataBuffer);
-  jvsSetDirectionTX();
 
   if (result == SAK_CHECKSUM_FAIL)
   {
@@ -1246,7 +1244,7 @@ void loop() {
   //fs_clear();
   //fs_addMap(0x0F0D0040, "Hori Stick", testMap, 53);
   //fs_addMap(0x07388838, "Tom's Stick", tomStick6Btn, 113);
-  //fs_addMap(0x7382215, "Hotas Test", hotas, 83);
+  //fs_addMap(0x7382215, "Hotas Test", hotas, 60);
   //fs_printROM(2);
 
   while (true) {
