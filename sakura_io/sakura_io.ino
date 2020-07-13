@@ -15,17 +15,18 @@
 #include "sakEEPROM.h"
 #include "GenericHIDParser.h"
 
+#include <AltSoftSerial.h>
+AltSoftSerial AltSerial;
+
 #define JvsSerial Serial
-#define PcSerial Serial
+#define PcSerial AltSerial
 
 //Debug Flag (Adds/Removes log code)
-#if 1
+#if 0x
 #define DEBUG
-#include <AltSoftSerial.h>
-AltSoftSerial debugSerial;
 char debugBuffer[100];
-#define DebugSerial debugSerial
-#define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); debugSerial.print(debugBuffer)
+#define DebugSerial AltSerial
+#define DebugLog(...) sprintf_P(debugBuffer, __VA_ARGS__); DebugSerial.print(debugBuffer)
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
 #define BYTE_TO_BINARY(byte)  \
@@ -1265,7 +1266,7 @@ void loop() {
 
   while (true) {
     //Process PC serial if needed
-    //processMapManager();
+    processMapManager();
 
     //Poll the USB devices
     Usb.Task();
