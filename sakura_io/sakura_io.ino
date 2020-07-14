@@ -22,7 +22,7 @@ AltSoftSerial AltSerial;
 #define PcSerial AltSerial
 
 //Debug Flag (Adds/Removes log code)
-#if 0x
+#if 1
 #define DEBUG
 char debugBuffer[100];
 #define DebugSerial AltSerial
@@ -59,7 +59,7 @@ char debugBuffer[100];
 #define JVS_RX          LOW
 
 //Identification
-const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v1.0a (Arduino Prototype);Created by Ioncannon"};
+const char IDENTIFICATION[] PROGMEM = {"Fragmenter Works;Sakura I/O;v1.0;Created by Ioncannon"};
 #define VERSION_CMD   0x13
 #define VERSION_JVS   0x30
 #define VERSION_COM   0x10
